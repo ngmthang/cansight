@@ -34,10 +34,10 @@ def make_noisy_observations(true_walls, n_observations=5, noise=0.02, seed=1):
     noisy = []
     for (a, b) in true_walls:
         for _ in range(n_observations):
-            jiiter = lambda: random.uniform(-noise, noise)
+            jitter = lambda: random.uniform(-noise, noise)
             noisy.append((
-                (a[0], jiiter(), a[1] + jiiter()),
-                (b[0], jiiter(), b[1] + jiiter()),
+                (a[0] + jitter(), a[1] + jitter()),
+                (b[0] + jitter(), b[1] + jitter()),
             ))
     return noisy
 
