@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Reality Capture → BIM: V1 Foundation
 
 This is Phase 0–2 of the build roadmap: the Building Model, the core
@@ -102,3 +103,6 @@ produce `list[Segment]` (pairs of 2D points) — the exact same input
 point of building it in this order: the interface between "real
 sensor data" and "clean architecture" was locked down and tested
 before any sensor code exists.
+=======
+# cansight
+>>>>>>> 420866c426715b864eb162b0799d3c51c12a70d2
