@@ -1,0 +1,2 @@
+ifcopenshell>=0.8.5
+numpy>=2.0

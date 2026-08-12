@@ -1,0 +1,26 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Generated output (never commit these -- they're pipeline artifacts,
+# regenerable by running examples/synthetic_house.py)
+*.ifc
+
+# Loose local debug/scratch scripts (naming convention for anything
+# not meant to be part of the committed project)
+debug_*.py
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
