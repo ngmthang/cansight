@@ -6,9 +6,15 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from building_model.schema import BuildingModel
-from review.correction_session import(
-    build_review_queue, next_review_item, approve,
-    correct_wall_dimension, correct_opening_dimension, reclassify_room,
+from geometry.room_extraction import extract_rooms, room_area
+from review.correction_session import (
+    build_review_queue,
+    next_review_item,
+    approve,
+    correct_wall_dimension,
+    correct_opening_dimension,
+    reclassify_room,
+    add_manual_wall,
 )
 from review.formatting import format_wall, format_room
 
@@ -111,6 +117,46 @@ def test_full_review_workflow_empties_queue():
     assert queue.remaining_count() == 0
     assert next_review_item(bm, queue) is None
     assert bm.validate() == []
+
+
+def test_add_manual_wall_closes_occluded_gap():
+    """Simulates the real scenario this was built for: furniture
+    (a bed, a table) occludes one wall during capture, so the
+    automated pipeline only detects 3 of 4 walls and no room
+    closes. A human reviewer manually adds the missing wall."""
+    bm = BuildingModel(building_id="occlusion_test")
+    bm.add_level("L1")
+    w1 = bm.add_wall("L1", ((0, 0), (5, 0)), confidence=0.4)
+    w2 = bm.add_wall("L1", ((5, 0), (5, 4)), confidence=0.4)
+    w3 = bm.add_wall("L1", ((5, 4), (0, 4)), confidence=0.4)
+
+    segments = [w1.centerline, w2.centerline, w3.centerline]
+    rooms_before = extract_rooms(segments)
+    assert len(rooms_before) == 0
+
+    queue = build_review_queue(bm)
+    new_id = add_manual_wall(bm, queue, "L1", ((0, 4), (0, 0)))
+
+    assert bm.objects[new_id].confidence == 1.0
+    assert (
+        bm.objects[new_id].provenance.detection_method
+        == "manual_correction"
+    )
+
+    segments.append(bm.objects[new_id].centerline)
+    rooms_after = extract_rooms(segments)
+    assert len(rooms_after) == 1
+    assert abs(room_area(rooms_after[0]) - 20.0) < 1e-6
+
+
+def test_add_manual_wall_not_added_to_review_queue():
+    """A manually-drawn wall is trusted immediately -- it shouldn't
+    show up as something still needing review."""
+    bm = BuildingModel(building_id="t")
+    bm.add_level("L1")
+    queue = build_review_queue(bm)
+    add_manual_wall(bm, queue, "L1", ((0, 0), (5, 0)))
+    assert queue.remaining_count() == 0
 
 
 if __name__ == "__main__":

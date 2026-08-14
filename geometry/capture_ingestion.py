@@ -336,7 +336,20 @@ def _ingest_plane_detection_bundle(bundle_dir: str) -> IngestedCapture:
         if p["alignment"] == "horizontal":
             all_z.extend(v[2] for v in p["boundary_vertices"])
 
-    fitted_walls = fit_walls(segments)
+    fitted_walls = fit_walls(
+        segments,
+        # Looser than the LiDAR path's defaults (6deg/0.08m):
+        # a line fit through only ~4-17 sparse ARKit plane-boundary
+        # points has genuinely higher angular noise than a fit
+        # through hundreds of dense LiDAR points, so the tighter
+        # LiDAR-tuned tolerance leaves near-duplicate detections of
+        # the same physical wall unmerged. Calibrated against a real
+        # iPad (non-LiDAR) capture -- see docs/ROOMPLAN_SPIKE.md
+        # Section 5 for the "needs real-device validation" note this
+        # confirms and resolves.
+        angle_tol_deg=25.0,
+        offset_tol=0.25,
+    )
     height_estimate = estimate_floor_and_ceiling(
         all_z, density_threshold=2
     )

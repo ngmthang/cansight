@@ -1,5 +1,16 @@
 # iOS Capture App — Reference Scaffold
 
+**Status: partially verified.** Confirmed to compile and run on a
+real device (iPad A16, plane-detection mode, via Swift
+Playgrounds) as of this update. LiDAR mode remains unverified --
+no LiDAR-equipped device has run this yet. Treat the
+plane-detection path as "builds and runs," not "accuracy
+validated" -- a real bundle from a real scan still needs to be
+run through the Python pipeline end-to-end to check that, which
+hasn't happened yet either.
+
+# iOS Capture App — Reference Scaffold
+
 **Status: unverified reference code.** These Swift files were
 written without access to Xcode, a simulator, or a physical
 device — nothing here has been compiled or run. API usage is

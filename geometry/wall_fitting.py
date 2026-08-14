@@ -132,8 +132,15 @@ class FittedWall:
     support_count: int # how many observations contributed
 
 
-def fit_walls(segments: list[Segment], assumed_thickness: float = 0.12) -> list[FittedWall]:
-    clusters = cluster_wall_observations(segments)
+def fit_walls(
+    segments: list[Segment],
+    assumed_thickness: float = 0.12,
+    angle_tol_deg: float = 6.0,
+    offset_tol: float = 0.08,
+) -> list[FittedWall]:
+    clusters = cluster_wall_observations(
+        segments, angle_tol_deg=angle_tol_deg, offset_tol=offset_tol
+    )
     results: list[FittedWall] = []
 
     for cluster in clusters:

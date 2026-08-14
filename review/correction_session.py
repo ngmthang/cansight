@@ -19,7 +19,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from building_model.schema import BuildingModel, Wall, Room, Opening
+from building_model.schema import (
+    BuildingModel, Wall, Room, Opening, Provenance
+)
 from review.queue import ReviewQueue
 from review.formatting import format_object
 import units
@@ -130,3 +132,38 @@ def reclassify_room(
     room.classification = classification
     room.confidence = 1.0
     queue.resolve(room_id)
+
+
+def add_manual_wall(
+        model: BuildingModel,
+        queue: ReviewQueue,
+        level: str,
+        centerline: tuple[tuple[float, float], tuple[float, float]],
+        thickness: float = 0.10,
+        height: float = 2.4,
+) -> str:
+    """
+    Adds a wall the automated pipeline never detected at all --
+    for example, one occluded by furniture (a bed, a table) that
+    blocked the camera's view during capture. Per the V1 spec
+    (Section 14): "Real-world scans contain... furniture blocking
+    walls" as one of the explicit reasons the human-in-the-loop
+    workflow exists, and (Section 15) "Add missing elements" is a
+    named required correction-UI capability. A manually-drawn wall
+    is trusted as ground truth -- confidence is set to 1.0
+    immediately, no review-queue entry needed, since a human just
+    placed it deliberately (unlike an AI detection, which starts
+    uncertain and gets confirmed/corrected).
+
+    Returns the new wall's id, so the caller can immediately use it
+    in a follow-up bounded_by list when re-running room extraction.
+    """
+    wall = model.add_wall(
+        level,
+        centerline,
+        thickness=thickness,
+        height=height,
+        confidence=1.0,
+        provenance=Provenance(detection_method="manual_correction"),
+    )
+    return wall.id
