@@ -6,6 +6,8 @@ import sys
 import os
 import json
 import tempfile
+import io
+import zipfile
 
 sys.path.insert(
     0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -205,6 +207,95 @@ def test_export_ifc_via_api():
 def test_operations_before_load_return_error():
     client = _make_client()
     resp = client.get("/api/review/next")
+    assert resp.status_code == 400
+
+
+def _zip_bundle(bundle_dir, nested_folder_name=None):
+    """Zips a bundle directory's manifest/points/planes files,
+    optionally wrapping them in a nested folder to simulate the
+    common real-world case (zipping a folder via Finder/Explorer/
+    Files app often adds an extra wrapping directory)."""
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w") as zf:
+        for fname in os.listdir(bundle_dir):
+            arcname = (
+                f"{nested_folder_name}/{fname}"
+                if nested_folder_name
+                else fname
+            )
+            zf.write(os.path.join(bundle_dir, fname), arcname)
+    zip_buf.seek(0)
+    return zip_buf
+
+
+def test_upload_bundle_flat_zip():
+    client = _make_client()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bundle_dir = _make_lidar_bundle_dir(tmpdir)
+        zip_buf = _zip_bundle(bundle_dir)
+
+    resp = client.post(
+        "/api/upload_bundle",
+        data={"bundle_zip": (zip_buf, "bundle.zip")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["loaded"] is True
+    assert len(data["walls"]) > 0
+
+
+def test_upload_bundle_nested_folder_zip():
+    """The common real-world case: the zip wraps its contents in a
+    folder (e.g. zipping a folder via a file manager)."""
+    client = _make_client()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bundle_dir = _make_lidar_bundle_dir(tmpdir)
+        zip_buf = _zip_bundle(bundle_dir, nested_folder_name="my_scan")
+
+    resp = client.post(
+        "/api/upload_bundle",
+        data={"bundle_zip": (zip_buf, "bundle.zip")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["loaded"] is True
+
+
+def test_upload_bundle_rejects_zip_slip():
+    client = _make_client()
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w") as zf:
+        zf.writestr("../../evil.txt", "malicious content")
+    zip_buf.seek(0)
+
+    resp = client.post(
+        "/api/upload_bundle",
+        data={"bundle_zip": (zip_buf, "evil.zip")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 400
+    assert "unsafe path" in resp.get_json()["error"]
+
+
+def test_upload_bundle_rejects_invalid_zip():
+    client = _make_client()
+    resp = client.post(
+        "/api/upload_bundle",
+        data={"bundle_zip": (io.BytesIO(b"not a zip"), "fake.zip")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 400
+    assert "not a valid zip" in resp.get_json()["error"]
+
+
+def test_upload_bundle_requires_file():
+    client = _make_client()
+    resp = client.post(
+        "/api/upload_bundle",
+        data={},
+        content_type="multipart/form-data",
+    )
     assert resp.status_code == 400
 
 

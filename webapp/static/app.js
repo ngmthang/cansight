@@ -285,6 +285,31 @@ async function loadBundle() {
   fetchNextReviewItem();
 }
 
+async function uploadBundleZip() {
+  const fileInput = document.getElementById("bundle-zip-input");
+  const file = fileInput.files[0];
+  if (!file) return;
+
+  loadStatusEl.textContent = "Uploading...";
+  const formData = new FormData();
+  formData.append("bundle_zip", file);
+
+  const resp = await fetch("/api/upload_bundle", {
+    method: "POST",
+    body: formData,
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    loadStatusEl.textContent = "Error: " + data.error;
+    return;
+  }
+  loadStatusEl.textContent = `Loaded (${data.capture_method})`;
+  currentModelData = data;
+  setControlsEnabled(true);
+  renderFloorplan(data);
+  fetchNextReviewItem();
+}
+
 async function approveCurrent(objectId) {
   await fetch("/api/review/approve", {
     method: "POST",
@@ -430,6 +455,9 @@ function setControlsEnabled(enabled) {
 // --- Wire up event listeners ---
 
 loadBtn.addEventListener("click", loadBundle);
+document
+  .getElementById("upload-btn")
+  .addEventListener("click", uploadBundleZip);
 drawWallBtn.addEventListener("click", toggleDrawingMode);
 reextractBtn.addEventListener("click", reextractRooms);
 exportIfcBtn.addEventListener("click", exportIfc);
