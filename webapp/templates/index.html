@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Reality Capture Review</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>Reality Capture &mdash; Review &amp; Correction</h1>
+      <div id="load-panel">
+        <input id="bundle-path" type="text"
+               placeholder="Path to capture bundle folder">
+        <button id="load-btn">Load Bundle</button>
+        <span id="load-status"></span>
+      </div>
+    </header>
+
+    <main>
+      <section id="floorplan-panel">
+        <div id="floorplan-toolbar">
+          <button id="draw-wall-btn" disabled>Draw Missing Wall</button>
+          <button id="reextract-btn" disabled>Re-extract Rooms</button>
+          <button id="export-ifc-btn" disabled>Export IFC</button>
+          <span id="draw-hint"></span>
+        </div>
+        <svg id="floorplan" viewBox="0 0 800 600"></svg>
+        <div id="legend">
+          <span class="swatch conf-high"></span> High confidence (&ge;90%)
+          <span class="swatch conf-med"></span> Medium (70&ndash;89%)
+          <span class="swatch conf-low"></span> Low (&lt;70%)
+        </div>
+        <div id="validation-errors"></div>
+      </section>
+
+      <section id="review-panel">
+        <h2>Review Queue <span id="remaining-count"></span></h2>
+        <div id="review-item">
+          <p id="review-empty">No model loaded yet.</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

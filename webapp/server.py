@@ -1,0 +1,321 @@
+"""
+    Local review/correction web app -- a real interface on top of the
+    existing, already-tested backend (building_model/, geometry/,
+    review/). This file adds no new domain logic; it's a thin HTTP
+    layer that calls the same functions the test suite already
+    exercises (build_review_queue, correct_wall_dimension,
+    add_manual_wall, etc.).
+
+    Single-user, local-only, in-memory state -- this is a development
+    tool for reviewing one capture at a time, not a multi-tenant
+    server. The V1 spec's actual server architecture (Section 14) is a
+    separate, later concern (see docs/BACKLOG.md).
+
+    Run with: python3 webapp/server.py
+    Then open: http://127.0.0.1:5000
+
+    :author: Minh Thang Nguyen
+    :version: August 14, 2026
+"""
+
+from __future__ import annotations
+import sys, os
+
+sys.path.insert(
+    0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+
+from flask import Flask, jsonify, request, render_template
+
+from building_model.schema import (
+    BuildingModel, Wall, Door, Window, Room
+)
+from review.queue import ReviewQueue
+from review.correction_session import (
+    build_review_queue,
+    next_review_item,
+    approve,
+    correct_wall_dimension,
+    correct_opening_dimension,
+    reclassify_room,
+    add_manual_wall,
+)
+from review.formatting import format_object
+from geometry.capture_ingestion import (
+    ingest_capture,
+    build_building_model_from_capture,
+)
+from geometry.room_extraction import extract_rooms
+from export.ifc_export import export_to_ifc
+import units
+
+app = Flask(__name__)
+
+# In-memory session state (single user, local tool)
+_state = {
+    "model": None, # BuildingModel | None
+    "queue": None, # ReviewQueu | None
+}
+
+
+def _require_model() -> BuildingModel:
+    if _state.get("model") is None:
+        raise RuntimeError("No model loaded yet")
+    return _state.get("model")
+
+
+def _wall_endpoint_position(wall: Wall, position_on_wall: float):
+    (x0, y0), (x1, y1) = wall.centerline
+    return (
+        x0 + position_on_wall * (x1 - x0),
+        y0 + position_on_wall * (y1 - y0),
+    )
+
+
+def _serialize_model(model: BuildingModel) -> dict:
+    """Turns the internal BuildingModel into a JSON-friendly shape
+    the frontend can render directly -- walls as line segments,
+    rooms as boundary polygons, doors/windows as points along their
+    host wall, everything tagged with confidence and a display
+    string via review/formatting.py so the UI never needs its own
+    copy of unit-conversion or formatting logic."""
+    walls, rooms, doors, windows = [], [], [], []
+
+    for obj in model.objects.values():
+        entry = {
+            "id": obj.id,
+            "confidence": obj.confidence,
+            "detection_method": obj.provenance.detection_method,
+            "label": format_object(obj, unit_system="us"),
+        }
+        if isinstance(obj, Wall):
+            entry["centerline"] = obj.centerline
+            walls.append(entry)
+        elif isinstance(obj, Room):
+            entry["boundary"] = obj.boundary
+            entry["classification"] = obj.classification
+            rooms.append(entry)
+        elif isinstance(obj, Door):
+            wall = model.objects.get(obj.host_wall_id)
+            if wall is not None:
+                entry["position"] = _wall_endpoint_position(
+                    wall, obj.position_on_wall
+                )
+                entry["host_wall_id"] = obj.host_wall_id
+                doors.append(entry)
+        elif isinstance(obj, Window):
+            wall = model.objects.get(obj.host_wall_id)
+            if wall is not None:
+                entry["position"] = _wall_endpoint_position(
+                    wall, obj.position_on_wall
+                )
+                entry["host_wall_id"] = obj.host_wall_id
+                windows.append(entry)
+
+    return {
+        "building_id": model.building_id,
+        "walls": walls,
+        "rooms": rooms,
+        "doors": doors,
+        "windows": windows,
+        "validation_errors": model.validate(),
+    }
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/api/model", methods=["GET"])
+def get_model():
+    if _state.get("model") is None:
+        return jsonify({"loaded": False})
+    payload = _serialize_model(_state.get("model"))
+    payload["loaded"] = True
+    payload["remaining_review_count"] = _state.get("queue").remaining_count()
+    return jsonify(payload)
+
+
+@app.route("/api/load_bundle", methods=["POST"])
+def load_bundle_route():
+    data = request.get_json(force=True)
+    bundle_dir = data.get("bundle_dir")
+    if not bundle_dir or not os.path.isdir(bundle_dir):
+        return (
+            jsonify({"error": f"bundle_dir not found: {bundle_dir!r}"}),
+            400,
+        )
+    try:
+        result = ingest_capture(bundle_dir)
+        model = build_building_model_from_capture(
+            result, building_id=os.path.basename(bundle_dir)
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+    _state["model"] = model
+    _state["queue"] = build_review_queue(model)
+    payload = _serialize_model(model)
+    payload["loaded"] = True
+    payload["capture_method"] = result.capture_method
+    return jsonify(payload)
+
+
+@app.route("/api/review/next", methods=["GET"])
+def review_next():
+    try:
+        model, queue = _require_model(), _state.get("queue")
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+
+    item = next_review_item(model, queue, unit_system="us")
+    if item is None:
+        return jsonify({"item": None})
+    obj = model.objects.get(item.object_id)
+    return jsonify({
+        "item": {
+            "object_id": item.object_id,
+            "display_text": item.display_text,
+            "remaining_count": item.remaining_count,
+            "type": obj.type.value,
+        }
+    })
+
+
+@app.route("/api/review/approve", methods=["POST"])
+def review_approve():
+    model, queue = _require_model(), _state.get("queue")
+    object_id = request.get_json(force=True).get("object_id")
+    if object_id not in model.objects:
+        return (
+            jsonify({"error": f"unknown id {object_id!r}"}),
+            404,
+        )
+    approve(model, queue, object_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/review/correct_wall", methods=["POST"])
+def review_correct_wall():
+    model, queue = _require_model(), _state.get("queue")
+    data = request.get_json(force=True)
+    try:
+        correct_wall_dimension(
+            model,
+            queue,
+            data.get("object_id"),
+            data.get("field"),
+            data.get("value_text"),
+            unit_system=data.get("unit_system", "us"),
+        )
+    except (ValueError, KeyError) as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True})
+
+
+@app.route("/api/review/correct_opening", methods=["POST"])
+def review_correct_opening():
+    model, queue = _require_model(), _state.get("queue")
+    data = request.get_json(force=True)
+    try:
+        correct_opening_dimension(
+            model,
+            queue,
+            data.get("object_id"),
+            data.get("field"),
+            data.get("value_text"),
+            unit_system=data.get("unit_system", "us"),
+        )
+    except (ValueError, KeyError) as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True})
+
+
+@app.route("/api/review/reclassify_room", methods=["POST"])
+def review_reclassify_room():
+    model, queue = _require_model(), _state.get("queue")
+    data = request.get_json(force=True)
+    try:
+        reclassify_room(
+            model, queue, data.get("object_id"), data.get("classification")
+        )
+    except (ValueError, KeyError) as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True})
+
+
+@app.route("/api/review/add_wall", methods=["POST"])
+def review_add_wall():
+    """The feature this whole UI exists to make usable: click two
+    points on the floor plan to draw in a wall the pipeline missed
+    (e.g. one occluded by furniture -- see docs/BACKLOG.md)."""
+    model, queue = _require_model(), _state.get("queue")
+    data = request.get_json(force=True)
+    try:
+        level = next(iter(model.levels.keys()))
+        centerline = (tuple(data.get("start")), tuple(data.get("end")))
+        new_id = add_manual_wall(model, queue, level, centerline)
+    except (ValueError, KeyError, StopIteration) as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, "wall_id": new_id})
+
+
+@app.route("/api/reextract_rooms", methods=["POST"])
+def reextract_rooms():
+    """After adding/editing walls, room boundaries may have changed
+    (e.g. a manually-added wall just closed a gap). Recomputes rooms
+    from the current wall set and replaces the model's room objects."""
+    model = _require_model()
+    level = next(iter(model.levels.keys()))
+
+    wall_ids = model.levels.get(level).walls
+    segments = [model.objects.get(wid).centerline for wid in wall_ids]
+    new_boundaries = extract_rooms(segments)
+
+    old_room_ids = list(model.levels.get(level).rooms)
+    for rid in old_room_ids:
+        del model.objects[rid]
+    model.levels.get(level).rooms = []
+    model.relationships = [
+        r for r in model.relationships if r.from_id not in old_room_ids
+    ]
+
+    for boundary in new_boundaries:
+        model.add_room(
+            level,
+            boundary,
+            bounded_by=wall_ids,
+            classification="unclassified",
+            confidence=0.7,
+        )
+
+    payload = _serialize_model(model)
+    payload["loaded"] = True
+    return jsonify(payload)
+
+
+@app.route("/api/export_ifc", methods=["POST"])
+def export_ifc_route():
+    model = _require_model()
+    errors = model.validate()
+    if errors:
+        return (
+            jsonify({
+                "errors": "Model has validation errors",
+                "details": errors,
+            }),
+            400,
+        )
+    out_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "webapp_exports",
+    )
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"{model.building_id}.ifc")
+    warnings = export_to_ifc(model, out_path)
+    return jsonify({"ok": True, "path": out_path, "warnings": warnings})
+
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5000)
