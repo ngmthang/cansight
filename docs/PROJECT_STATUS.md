@@ -50,6 +50,8 @@ units.py -- feet/inches <-> meters
 v
 export/ifc_export.py -- validated IFC4 output
 webapp/server.py + static/ -- local browser UI over all of the above
+webapp/storage.py -- SQLite persistence (multi-project,
+survives restart)
 
 
 Every algorithm above is original, from-scratch, and unit-tested.
@@ -58,7 +60,7 @@ detection API.
 
 ---
 
-## 3. What's Built and Tested (76/76 passing as of this handoff)
+## 3. What's Built and Tested (87/87 passing as of this handoff)
 
 | Area | File(s) | Tests |
 |---|---|---|
@@ -68,7 +70,7 @@ detection API.
 | 3D extension (floor/ceiling/volume, opening containment) | `building_model/schema.py`, `geometry/height_inference.py` | 11 |
 | LiDAR capture ingestion (RANSAC) | `geometry/plane_detection.py`, `capture_ingestion.py` | 10 |
 | Non-LiDAR capture ingestion (sparse plane fitting) | `capture_ingestion.py` | 9 |
-| Web review UI backend (Flask API) | `webapp/server.py` | 10 |
+| Web review UI backend + persistence (Flask API, SQLite, bundle upload) | `webapp/server.py`, `webapp/storage.py` | 21 |
 
 Run everything:
 ```powershell
@@ -114,6 +116,16 @@ missed:
    implemented until real data proved it necessary. The web UI's
    "Draw Missing Wall" feature is the actual usable interface for
    this.
+3. **A separate, unrelated bug found while adding persistence:**
+   `geometry/plane_detection.py`'s RANSAC used an internal
+   `random.Random(seed=None)` instance that global `random.seed()`
+   calls in tests couldn't reach, making a subset of
+   `tests/test_capture_ingestion.py` flaky (~1 in 10 runs).
+   Fixed by threading an explicit `seed` parameter through
+   `extract_wall_candidates()` and `ingest_capture(...,
+   ransac_seed=...)`. Worth knowing: production capture calls
+   should still leave `ransac_seed=None` (non-determinism doesn't
+   matter for real data); only tests need a fixed seed.
 
 **Takeaway for continued development:** keep accumulating real
 capture bundles as permanent test fixtures, not just one-off
@@ -132,16 +144,6 @@ See `docs/BACKLOG.md` for full detail on deferred features
 (currently: furniture-aware automated wall detection). Additional
 gaps not yet in that file:
 
-- **No persistent storage.** `webapp/server.py`'s model/queue
-  state is an in-memory global, lost on restart, single-model-
-  at-a-time. Fine for solo use; blocks any multi-user or
-  multi-project use. V1 spec Section 15 ("Database/storage
-  architecture") was never implemented.
-- **Bundle loading requires a local filesystem path.** The web UI's
-  "Load Bundle" assumes the Flask process can see the bundle
-  directory directly. No upload mechanism exists yet -- a real
-  blocker the moment the web UI isn't run on the same machine the
-  bundle was transferred to.
 - **Manhattan-alignment rotation not implemented**
   (`capture_ingestion.py`'s axis conversion does the ARKit-Y-up ->
   model-Z-up relabel only, not rotation to the dominant wall
@@ -154,36 +156,46 @@ gaps not yet in that file:
   (`min(0.6, 0.3 + 0.05*support_count)` for walls) -- reasonable
   defaults, not yet calibrated against a real ground-truth
   evaluation the way V1 spec Section 18 describes.
+- **`webapp/storage.py` is single-machine SQLite**, not a shared
+  server -- resolves "survive a restart" and "multiple projects"
+  but not "multiple people accessing the same project
+  concurrently." Fine for the current solo-use scope; would need
+  real client-server separation for team use.
 
 ---
 
 ## 6. Practical Path Forward (recommended priority order)
 
+Completed since this document was first written: bundle upload
+(zip, with zip-slip protection and nested-folder handling) and
+SQLite-backed persistence (multi-project, survives restart,
+correctly distinguishes "human reviewed this" from "confidence
+happens to be high" -- see `ReviewQueue.resolved_ids()`'s
+docstring for the bug this specifically avoids).
+
 If continuing to build toward actual organizational use (per the
 original stated goal), in priority order:
 
-1. **Bundle upload endpoint** in `webapp/server.py` -- accept a
-   zipped bundle via HTTP POST instead of requiring a local path.
-   Small, high-value, unblocks using the web UI from a different
-   machine than the one holding the bundle files.
-2. **Swap in-memory `_state` for lightweight persistence** (SQLite
-   is proportionate at this scale -- no need for a heavier DB yet).
-   Enables multiple buildings/projects to coexist and survive a
-   restart.
-3. **Grow the real-capture regression corpus** -- formalize 1-2 of
-   the real bundles already captured into permanent test fixtures.
-4. **Real Xcode/Mac access**, whenever feasible, to validate the
+1. **Grow the real-capture regression corpus** -- formalize 1-2 of
+   the real bundles already captured into permanent test fixtures,
+   so future calibration drift (like the non-LiDAR clustering
+   tolerance fix) gets caught automatically instead of requiring
+   another live debugging session.
+2. **Real Xcode/Mac access**, whenever feasible, to validate the
    LiDAR capture path (`ARCaptureSession.swift`'s primary mode) on
    real hardware -- currently completely unverified.
-5. Everything in `docs/BACKLOG.md` (furniture-aware detection) and
+3. Everything in `docs/BACKLOG.md` (furniture-aware detection) and
    the "Explicitly NOT implemented" list in `ios/README.md`
    (guided coverage UI, multi-room stitching, upload/networking).
+4. If/when multiple people need concurrent access:
+   `webapp/storage.py`'s SQLite layer would need to become a real
+   client-server backend -- not urgent at current (solo) scale.
 
 ---
 
 ## 7. How to Continue
 
 This repo is at `https://github.com/ngmthang/cansight` (folder
-`reality-capture-bim/`). Clone/pull, confirm all 76 tests pass
+`reality-capture-bim/`). Clone/pull, confirm all 87 tests pass
 locally, then pick up from Section 6's priority list, or address
 whatever specific need prompted returning to this project.
