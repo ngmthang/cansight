@@ -9,17 +9,6 @@ validated" -- a real bundle from a real scan still needs to be
 run through the Python pipeline end-to-end to check that, which
 hasn't happened yet either.
 
-# iOS Capture App — Reference Scaffold
-
-**Status: unverified reference code.** These Swift files were
-written without access to Xcode, a simulator, or a physical
-device — nothing here has been compiled or run. API usage is
-grounded against Apple's current ARKit documentation and known-
-working reference implementations, but you should expect to fix
-compiler errors and API mismatches when you actually build this
-in Xcode. Treat this as a structured starting point, not
-finished code.
-
 ## What's here
 
 - `ARCaptureSession.swift` — configures an `ARSession` and
@@ -33,9 +22,12 @@ finished code.
   in the exact format `geometry/capture_ingestion.py` expects
   (`manifest.json` + `points.json` for LiDAR mode,
   `manifest.json` + `planes.json` for plane-detection mode).
-- `CaptureView.swift` — minimal SwiftUI screen: live camera
-  passthrough, mode indicator, start/stop, save-bundle button,
-  an Export button (system share sheet), running progress count.
+- `CaptureView.swift` — SwiftUI capture screen: live camera
+  passthrough with real-time detected-surface visualization
+  (ARKit's built-in mesh overlay in LiDAR mode; colored
+  `ARPlaneAnchor` overlays in plane-detection mode), mode
+  indicator, start/stop, save-bundle button, running progress
+  count.
 
 ## Why raw ARKit capture, not RoomPlan
 
@@ -65,12 +57,6 @@ the appropriate confidence formula. Every non-LiDAR capture
 should land near the top of `review/queue.py`'s confidence-
 sorted queue automatically, flagged for heavier human
 verification rather than silently treated as LiDAR-quality data.
-
-**Note on iPad (A16) and similar non-Pro devices:** these have
-no LiDAR scanner (LiDAR has only ever shipped on the iPad Pro
-line), so `ARCaptureSession` will always select plane-detection
-mode on them automatically. This is expected, not a bug — see
-the table above for the accuracy trade-off that implies.
 
 ## Setting this up in Xcode (if/when Mac access is available)
 
@@ -164,14 +150,20 @@ Python side either.
 
 ## Explicitly NOT implemented here (scope boundaries)
 
-- **Guided coverage UI** (V1 spec Section 3's live wall-coverage
-  heat map, minimum-scan-quality enforcement). What's here is a
-  raw progress counter, not a coverage percentage.
+- **Real-time detected-surface visualization.** `ARPassthroughView`
+  now shows what's been detected while scanning: LiDAR mode uses
+  ARKit's built-in mesh overlay (`ARSCNDebugOptions
+  .showSceneUnderstanding`); non-LiDAR mode renders each detected
+  `ARPlaneAnchor` as a colored overlay (blue = wall, green =
+  floor/ceiling), updated live as ARKit refines its detection.
+  This is NOT a coverage-percentage/completeness score -- it shows
+  what's been found, not how much of the room is left to scan.
+  V1 spec Section 3's fuller "guided coverage" concept (a
+  heat map, minimum-scan-quality enforcement) is still unbuilt.
 - **Bundle upload / networking.** `BundleWriter` writes to local
-  device storage only; getting bundles to a server (V1 spec
-  Section 14's "capture bundle upload -> async server-side
-  reconstruction" architecture) beyond the manual Export/AirDrop
-  step above is unbuilt.
+  device storage only. Getting bundles from the device to a
+  server (V1 spec Section 14's "capture bundle upload -> async
+  server-side reconstruction" architecture) is unbuilt.
 - **Multi-room / multi-level capture UX.** One continuous
   `ARSession` per bundle; no in-app flow for "now scan the next
   room" or stitching multiple sessions together.
@@ -183,8 +175,7 @@ Python side either.
   default of 3) is a reasonable fallback but genuinely untested
   against real non-LiDAR capture noise. This is exactly the kind
   of thing `docs/ROOMPLAN_SPIKE.md`'s "needs hands-on testing"
-  section already flags for real-device validation — and an
-  iPad (A16) test is the first real chance to check it.
+  section already flags for real-device validation.
 - **Manhattan-alignment rotation** (V1 spec Section 4). The
   Python-side axis conversion (`capture_ingestion.py`) does the
   ARKit-Y-up → model-Z-up relabel only, not the rotation to

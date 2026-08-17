@@ -2,14 +2,13 @@
 //  CaptureView.swift
 //  RealityCaptureBIM
 //
-//  Minimal capture UI: live camera passthrough (so the user can see
-//  what they're scanning), start/stop controls, and a running
-//  progress count as a crude coverage signal. This intentionally
-//  does NOT implement the full "guided coverage heat map" UI
-//  described in V1 spec Section 3 -- that's a real design/
-//  engineering task on its own, out of scope for this scaffold.
-//  What's here is the minimum needed to actually run a capture
-//  session (LiDAR or non-LiDAR, auto-detected) and produce a bundle.
+//  Minimal capture UI: live camera passthrough with real-time
+//  plane/mesh visualization (so the user can see what's been
+//  detected and move the camera to fill gaps), start/stop
+//  controls, and a running progress count. Does NOT implement a
+//  coverage-percentage estimate (V1 spec Section 3's fuller
+//  "guided coverage" concept) -- what's here is visual feedback of
+//  detected surfaces, not a completeness score.
 //
 //  REFERENCE / UNVERIFIED -- see ARCaptureSession.swift's header.
 //
@@ -21,14 +20,99 @@ import SceneKit
 struct ARPassthroughView: UIViewRepresentable {
     let session: ARSession
 
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
     func makeUIView(context: Context) -> ARSCNView {
         let view = ARSCNView(frame: .zero)
         view.session = session
         view.automaticallyUpdatesLighting = true
+        view.delegate = context.coordinator
+
+        if ARCaptureSession.supportsLiDAR {
+            // Apple's built-in mesh visualization -- draws the
+            // detected scene geometry directly as an overlay. No
+            // custom rendering code needed for LiDAR mode.
+            view.debugOptions = [.showSceneUnderstanding]
+        }
+
         return view
     }
 
     func updateUIView(_ uiView: ARSCNView, context: Context) {}
+
+    /// Handles live plane visualization for non-LiDAR
+    /// (plane-detection) mode. LiDAR mode uses
+    /// ARSCNDebugOptions.showSceneUnderstanding instead (set in
+    /// makeUIView), which needs no custom rendering.
+    class Coordinator: NSObject, ARSCNViewDelegate {
+        func renderer(
+            _ renderer: SCNSceneRenderer,
+            didAdd node: SCNNode,
+            for anchor: ARAnchor
+        ) {
+            guard let planeAnchor = anchor as? ARPlaneAnchor else {
+                return
+            }
+            node.addChildNode(
+                Self.planeVisualization(for: planeAnchor)
+            )
+        }
+
+        func renderer(
+            _ renderer: SCNSceneRenderer,
+            didUpdate node: SCNNode,
+            for anchor: ARAnchor
+        ) {
+            guard let planeAnchor = anchor as? ARPlaneAnchor,
+                let planeNode = node.childNodes.first,
+                let plane = planeNode.geometry as? SCNPlane
+            else { return }
+
+            // ARKit refines a plane's extent continuously as it
+            // sees more of the surface -- keep the overlay in sync
+            // so the user sees detection improve live, not just a
+            // one-shot guess.
+            plane.width = CGFloat(planeAnchor.extent.x)
+            plane.height = CGFloat(planeAnchor.extent.z)
+            planeNode.simdPosition = planeAnchor.center
+        }
+
+        private static func planeVisualization(
+            for planeAnchor: ARPlaneAnchor
+        ) -> SCNNode {
+            let plane = SCNPlane(
+                width: CGFloat(planeAnchor.extent.x),
+                height: CGFloat(planeAnchor.extent.z)
+            )
+            let material = SCNMaterial()
+            // blue = wall (vertical), green = floor/ceiling
+            // (horizontal) -- same color convention as the web
+            // review UI's confidence coloring, so a user who later
+            // reviews the same capture in the browser sees a
+            // consistent visual language
+            material.diffuse.contents =
+                planeAnchor.alignment == .vertical
+                ? UIColor.systemBlue.withAlphaComponent(0.35)
+                : UIColor.systemGreen.withAlphaComponent(0.35)
+            material.isDoubleSided = true
+            plane.materials = [material]
+
+            let planeNode = SCNNode(geometry: plane)
+            planeNode.simdPosition = planeAnchor.center
+            // SCNPlane lies in the local XY plane by default (normal
+            // along Z); ARKit's plane anchors define their extent
+            // along local X/Z (normal along Y) regardless of whether
+            // the anchor represents a vertical or horizontal
+            // real-world surface -- the anchor's own transform
+            // handles the actual world-space orientation. Standard
+            // rotation from Apple's own ARKit plane-visualization
+            // sample code.
+            planeNode.eulerAngles.x = -.pi / 2
+            return planeNode
+        }
+    }
 }
 
 struct CaptureView: View {
