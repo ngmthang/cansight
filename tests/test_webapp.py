@@ -20,6 +20,14 @@ sys.path.insert(
     ),
 )
 
+# Redirect the server's SQLite database to an isolated temp file
+# BEFORE importing webapp.server, since server.py computes _DB_PATH
+# and calls storage.init_db() at import time -- without this, tests
+# would read/write the real repo's webapp_data.db, causing test
+# pollution across runs.
+_TEST_DB_DIR = tempfile.mkdtemp()
+os.environ["WEBAPP_DB_PATH"] = os.path.join(_TEST_DB_DIR, "test.db")
+
 from geometry.capture_ingestion import write_bundle
 import random
 
@@ -28,9 +36,12 @@ def _make_client():
     import webapp.server as server_module
 
     server_module.app.testing = True
-    # reset state between tests
+    # reset ALL session state between tests, not just model/queue --
+    # a leftover project_id would cause _persist_current_state() to
+    # write into an unrelated project the next test creates
     server_module._state["model"] = None
     server_module._state["queue"] = None
+    server_module._state["project_id"] = None
     return server_module.app.test_client()
 
 
@@ -297,6 +308,134 @@ def test_upload_bundle_requires_file():
         content_type="multipart/form-data",
     )
     assert resp.status_code == 400
+
+
+def test_projects_list_empty_initially():
+    client = _make_client()
+    resp = client.get("/api/projects")
+    assert resp.status_code == 200
+    # not asserting == [] since other tests in this run may have
+    # saved projects to the same (isolated, per-test-run) temp db --
+    # just confirming the endpoint works and returns a list
+    assert isinstance(resp.get_json()["projects"], list)
+
+
+def test_load_bundle_creates_persisted_project():
+    client = _make_client()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bundle_dir = _make_lidar_bundle_dir(tmpdir)
+        data = client.post(
+            "/api/load_bundle", json={"bundle_dir": bundle_dir}
+        ).get_json()
+
+    project_id = data.get("project_id")
+    assert project_id is not None
+
+    projects = client.get("/api/projects").get_json()["projects"]
+    ids = [p["project_id"] for p in projects]
+    assert project_id in ids
+
+
+def test_survives_simulated_restart():
+    """The actual point of this whole feature: save state, then
+    simulate a server restart (wipe in-memory _state completely,
+    as a real process restart would), and confirm the project can
+    be resumed from disk with review progress intact."""
+    client = _make_client()
+    import webapp.server as server_module
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bundle_dir = _make_lidar_bundle_dir(tmpdir)
+        data = client.post(
+            "/api/load_bundle", json={"bundle_dir": bundle_dir}
+        ).get_json()
+
+    project_id = data["project_id"]
+
+    # approve one object, so there's real review progress to lose
+    first_item = client.get("/api/review/next").get_json()["item"]
+    client.post(
+        "/api/review/approve",
+        json={"object_id": first_item["object_id"]},
+    )
+    remaining_before = client.get("/api/model").get_json()[
+        "remaining_review_count"
+    ]
+
+    # simulate a full process restart: wipe in-memory state entirely
+    server_module._state["model"] = None
+    server_module._state["queue"] = None
+    server_module._state["project_id"] = None
+    assert client.get("/api/model").get_json()["loaded"] is False
+
+    # resume from disk
+    resp = client.post(f"/api/projects/{project_id}/activate")
+    assert resp.status_code == 200
+    resumed = resp.get_json()
+    assert resumed["loaded"] is True
+
+    remaining_after = client.get("/api/model").get_json()[
+        "remaining_review_count"
+    ]
+    assert (
+        remaining_after == remaining_before
+    )  # review progress survived
+
+    # and the approved object should NOT reappear as next-for-review
+    next_item = client.get("/api/review/next").get_json()["item"]
+    assert next_item["object_id"] != first_item["object_id"]
+
+
+def test_activate_nonexistent_project_returns_404():
+    client = _make_client()
+    resp = client.post("/api/projects/does-not-exist/activate")
+    assert resp.status_code == 404
+
+
+def test_delete_project():
+    client = _make_client()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bundle_dir = _make_lidar_bundle_dir(tmpdir)
+        data = client.post(
+            "/api/load_bundle", json={"bundle_dir": bundle_dir}
+        ).get_json()
+
+    project_id = data["project_id"]
+    resp = client.delete(f"/api/projects/{project_id}")
+    assert resp.status_code == 200
+
+    projects = client.get("/api/projects").get_json()["projects"]
+    ids = [p["project_id"] for p in projects]
+    assert project_id not in ids
+
+    # deleting the ACTIVE project should also clear in-memory state
+    assert client.get("/api/model").get_json()["loaded"] is False
+
+
+def test_two_projects_coexist_independently():
+    client = _make_client()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bundle_dir_a = _make_lidar_bundle_dir(tmpdir)
+        data_a = client.post(
+            "/api/load_bundle", json={"bundle_dir": bundle_dir_a}
+        ).get_json()
+        project_a = data_a["project_id"]
+
+        bundle_dir_b = _make_lidar_bundle_dir(
+            os.path.join(tmpdir, "second")
+        )
+        data_b = client.post(
+            "/api/load_bundle", json={"bundle_dir": bundle_dir_b}
+        ).get_json()
+        project_b = data_b["project_id"]
+
+    assert project_a != project_b
+
+    # both should be independently resumable
+    resp_a = client.post(f"/api/projects/{project_a}/activate")
+    assert resp_a.status_code == 200
+    resp_b = client.post(f"/api/projects/{project_b}/activate")
+    assert resp_b.status_code == 200
 
 
 if __name__ == "__main__":

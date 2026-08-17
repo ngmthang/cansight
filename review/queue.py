@@ -1,18 +1,14 @@
 """
-    Problem: the correction UI (V1 spec, Section 11) needs to guide the user
-    to the LOWEST-confidence objects first, not make them scan the whole
-    model. As objects get corrected/approved, the queue needs to update
-    without a full re-sort every time.
+Problem: the correction UI (V1 spec, Section 11) needs to guide the user
+to the LOWEST-confidence objects first, not make them scan the whole
+model. As objects get corrected/approved, the queue needs to update
+without a full re-sort every time.
 
-    This is a textbook priority queue (min-heap on confidence), with lazy
-    deletion to handle the "approve/edit an object that's already in the
-    heap" case cheaply (O(log n) push, O(log n) amortized pop) instead of
-    rebuilding the heap on every correction.
-
-    @author: Minh Thang Nguyen
-    @version: August 10, 2026
+This is a textbook priority queue (min-heap on confidence), with lazy
+deletion to handle the "approve/edit an object that's already in the
+heap" case cheaply (O(log n) push, O(log n) amortized pop) instead of
+rebuilding the heap on every correction.
 """
-
 
 from __future__ import annotations
 import heapq
@@ -28,8 +24,12 @@ class _HeapEntry:
 class ReviewQueue:
     def __init__(self):
         self._heap: list[_HeapEntry] = []
-        self._current_confidence: dict[str, float] = {} # latest known confidence per object
-        self._resolved: set[str] = set() # approved/deleted -> no longer needs review
+        self._current_confidence: dict[str, float] = (
+            {}
+        )  # latest known confidence per object
+        self._resolved: set[str] = (
+            set()
+        )  # approved/deleted -> no longer needs review
 
     def add_or_update(self, object_id: str, confidence: float) -> None:
         self._current_confidence[object_id] = confidence
@@ -37,7 +37,7 @@ class ReviewQueue:
         heapq.heappush(self._heap, _HeapEntry(confidence, object_id))
 
     def resolve(self, object_id: str) -> None:
-        """Mark reviewd (approved, or corrected+re-approved). Lazy-deleted
+        """Mark reviewed (approved, or corrected+re-approved). Lazy-deleted
         from the heap: stale entries are skipped when popped."""
         self._resolved.add(object_id)
 
@@ -45,7 +45,10 @@ class ReviewQueue:
         if entry.object_id in self._resolved:
             return True
         # stale if a newer confidence value was pushed for this object
-        return self._current_confidence.get(entry.object_id) != entry.confidence
+        return (
+            self._current_confidence.get(entry.object_id)
+            != entry.confidence
+        )
 
     def next_for_review(self) -> str | None:
         """
@@ -68,6 +71,7 @@ class ReviewQueue:
     def peek_batch(self, n: int) -> list[str]:
         """Non-destructive look at the next n items needing review, for the
         'here are your top 5 lowest-confidence objects' UI panel."""
+        seen: list[_HeapEntry] = []
         results: list[str] = []
         heap_copy = list(self._heap)
         heapq.heapify(heap_copy)
@@ -80,6 +84,17 @@ class ReviewQueue:
 
     def remaining_count(self) -> int:
         return sum(
-            1 for oid, conf in self._current_confidence.items()
+            1
+            for oid, conf in self._current_confidence.items()
             if oid not in self._resolved
         )
+
+    def resolved_ids(self) -> set[str]:
+        """A copy of the currently-resolved object id set -- needed
+        to persist review progress (e.g. webapp/storage.py), since
+        rebuilding a queue fresh from a model's confidence values
+        alone can't recover which objects a human already reviewed:
+        a high-confidence auto-detection and a human-approved
+        object can have the same confidence value (1.0), but only
+        one of them was actually looked at by a person."""
+        return set(self._resolved)

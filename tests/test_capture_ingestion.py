@@ -1,18 +1,21 @@
 """
-    Run with: python tests/test_capture_ingestion.py
+Run with: python3 tests/test_capture_ingestion.py
 """
 
-import sys, os, random, tempfile, json
+import sys
+import os
+import random
+import tempfile
+import json
 
 sys.path.insert(
     0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 
 from geometry.plane_detection import (
-     ransac_plane_segmentation,
-     extract_wall_candidates,
+    ransac_plane_segmentation,
+    extract_wall_candidates,
 )
-
 from geometry.wall_fitting import fit_walls
 from geometry.room_extraction import extract_rooms, room_area
 from geometry.capture_ingestion import (
@@ -42,11 +45,14 @@ def _sample_wall_plane(
 
 
 def _sample_horizontal_plane(x_range, y_range, z, n=150, noise=0.01):
-    return [(
+    return [
+        (
             random.uniform(*x_range),
             random.uniform(*y_range),
             z + random.uniform(-noise, noise),
-        ) for _ in range(n)]
+        )
+        for _ in range(n)
+    ]
 
 
 def _synthetic_room_points(seed=5):
@@ -71,13 +77,13 @@ def test_ransac_finds_all_planes():
 
 def test_wall_candidates_excludes_floor_and_ceiling():
     points = _synthetic_room_points()
-    candidates = extract_wall_candidates(points)
+    candidates = extract_wall_candidates(points, seed=1)
     assert len(candidates) == 4
 
 
-def test_wall_candidates_position_are_accurate():
+def test_wall_candidate_positions_are_accurate():
     points = _synthetic_room_points()
-    candidates = extract_wall_candidates(points)
+    candidates = extract_wall_candidates(points, seed=1)
     # every candidate's z_samples should span close to the full
     # 0-2.4m wall height
     for c in candidates:
@@ -89,23 +95,28 @@ def test_wall_candidates_feed_existing_pipeline():
     """The real integration test: raw points -> plane_detection ->
     wall_fitting -> room_extraction, using every geometry module."""
     points = _synthetic_room_points()
-    candidates = extract_wall_candidates(points)
+    candidates = extract_wall_candidates(points, seed=1)
     segments = [c.segment for c in candidates]
-    fitted =  fit_walls(segments)
+    fitted = fit_walls(segments)
     rooms = extract_rooms([w.centerline for w in fitted])
     assert len(rooms) == 1
-    assert abs(room_area(rooms[0]) - 20.0) < 1.0 # within 1 sq m of truth
+    assert (
+        abs(room_area(rooms[0]) - 20.0) < 1.0
+    )  # within 1 sq m of truth
 
 
-def test_ransac_ignore_sparse_outlier_noise():
+def test_ransac_ignores_sparse_outlier_noise():
     random.seed(2)
     points = _synthetic_room_points(seed=2)
     # sprinkle in random noise points that shouldn't form a plane
-    noise_points = [(
-        random.uniform(-1, 6),
-        random.uniform(-1, 5),
-        random.uniform(-1, 3),
-    ) for _ in range(20)]
+    noise_points = [
+        (
+            random.uniform(-1, 6),
+            random.uniform(-1, 5),
+            random.uniform(-1, 3),
+        )
+        for _ in range(20)
+    ]
     planes = ransac_plane_segmentation(points + noise_points, seed=1)
     # should still find the 6 real surfaces; scattered noise shouldn't
     # form a 20-point-min plane of its own
@@ -139,13 +150,16 @@ def test_bundle_rejects_wrong_coordinate_frame():
         bd = os.path.join(tmpdir, "bad")
         os.makedirs(bd)
         with open(os.path.join(bd, "manifest.json"), "w") as f:
-            json.dump({
-                "session_id": "x",
-                "device_model": "y",
-                "capture_timestamp": "z",
-                "coordinate_frame": "some_other_frame",
-                "point_count": 1,
-            }, f)
+            json.dump(
+                {
+                    "session_id": "x",
+                    "device_model": "y",
+                    "capture_timestamp": "z",
+                    "coordinate_frame": "some_other_frame",
+                    "point_count": 1,
+                },
+                f,
+            )
         with open(os.path.join(bd, "points.json"), "w") as f:
             json.dump([[0, 0, 0]], f)
         try:
@@ -160,13 +174,16 @@ def test_bundle_rejects_mismatched_point_count():
         bd = os.path.join(tmpdir, "bad")
         os.makedirs(bd)
         with open(os.path.join(bd, "manifest.json"), "w") as f:
-            json.dump({
-                "session_id": "x",
-                "device_model": "y",
-                "capture_timestamp": "z",
-                "coordinate_frame": "arkit_world_y_up_meters",
-                "point_count": 100,
-            }, f)
+            json.dump(
+                {
+                    "session_id": "x",
+                    "device_model": "y",
+                    "capture_timestamp": "z",
+                    "coordinate_frame": "arkit_world_y_up_meters",
+                    "point_count": 100,
+                },
+                f,
+            )
         with open(os.path.join(bd, "points.json"), "w") as f:
             json.dump([[0, 0, 0]], f)
         try:
@@ -185,13 +202,14 @@ def test_ingest_capture_full_pipeline():
         ((5, 4), (0, 4)),
         ((0, 4), (0, 0)),
     ]:
-        points_arkit += [(
-            a[0] + t * (b[0] - a[0]) + random.uniform(-0.01, 0.01),
-            random.uniform(0, 2.4),
-            a[1] + t * (b[1] - a[1]) + random.uniform(-0.01, 0.01),
-        ) for t in [random.uniform(0, 1) for _ in range(150)]
+        points_arkit += [
+            (
+                a[0] + t * (b[0] - a[0]) + random.uniform(-0.01, 0.01),
+                random.uniform(0, 2.4),
+                a[1] + t * (b[1] - a[1]) + random.uniform(-0.01, 0.01),
+            )
+            for t in [random.uniform(0, 1) for _ in range(150)]
         ]
-
     points_arkit += [
         (random.uniform(0, 5), 0.0, random.uniform(0, 4))
         for _ in range(150)
@@ -210,7 +228,7 @@ def test_ingest_capture_full_pipeline():
             "2026-01-01T00:00:00Z",
             points_arkit,
         )
-        result = ingest_capture(bundle_dir)
+        result = ingest_capture(bundle_dir, ransac_seed=1)
 
     assert len(result.fitted_walls) == 4
     assert abs(result.height_estimate.height - 2.4) < 0.3
@@ -219,13 +237,7 @@ def test_ingest_capture_full_pipeline():
 def test_ingest_capture_raises_on_insufficient_points():
     with tempfile.TemporaryDirectory() as tmpdir:
         bundle_dir = os.path.join(tmpdir, "tiny")
-        write_bundle(
-            bundle_dir,
-            "s",
-            "d",
-            "t",
-            [(0, 0, 0), (1, 0, 0)]
-        )
+        write_bundle(bundle_dir, "s", "d", "t", [(0, 0, 0), (1, 0, 0)])
         try:
             ingest_capture(bundle_dir)
             assert False, "should have raised ValueError"
@@ -234,13 +246,15 @@ def test_ingest_capture_raises_on_insufficient_points():
 
 
 if __name__ == "__main__":
-    tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
+    tests = [
+        v for k, v in list(globals().items()) if k.startswith("test_")
+    ]
     passed = 0
     for t in tests:
         try:
             t()
-            print(f"PASS {t.__name__}")
+            print(f"PASS  {t.__name__}")
             passed += 1
         except AssertionError as e:
-            print(f"FAIL {t.__name__}: {e}")
+            print(f"FAIL  {t.__name__}: {e}")
     print(f"\n{passed}/{len(tests)} passed")

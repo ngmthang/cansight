@@ -37,6 +37,7 @@ from building_model.schema import (
 from review.queue import ReviewQueue
 from review.correction_session import (
     build_review_queue,
+    build_review_queue_with_resolved,
     next_review_item,
     approve,
     correct_wall_dimension,
@@ -52,14 +53,38 @@ from geometry.capture_ingestion import (
 from geometry.room_extraction import extract_rooms
 from export.ifc_export import export_to_ifc
 import units
+import webapp.storage as storage
 
 app = Flask(__name__)
 
+_DB_PATH = os.environ.get(
+    "WEBAPP_DB_PATH",
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "webapp_data.db",
+    ),
+)
+storage.init_db(_DB_PATH)
+
 # --- In-memory session state (single user, local tool) ---
+# Persisted to SQLite after every mutation via _persist_current_state()
+# so the active project survives a server restart -- see
+# webapp/storage.py and docs/PROJECT_STATUS.md Section 6.
 _state = {
     "model": None,  # BuildingModel | None
     "queue": None,  # ReviewQueue | None
+    "project_id": None,  # str | None
 }
+
+
+def _persist_current_state() -> None:
+    if _state["model"] is not None and _state["project_id"] is not None:
+        storage.save_project(
+            _DB_PATH,
+            _state["project_id"],
+            _state["model"],
+            _state["queue"].resolved_ids(),
+        )
 
 
 def _require_model() -> BuildingModel:
@@ -137,6 +162,7 @@ def get_model():
         return jsonify({"loaded": False})
     payload = _serialize_model(_state["model"])
     payload["loaded"] = True
+    payload["project_id"] = _state["project_id"]
     payload["remaining_review_count"] = _state[
         "queue"
     ].remaining_count()
@@ -163,9 +189,12 @@ def load_bundle_route():
 
     _state["model"] = model
     _state["queue"] = build_review_queue(model)
+    _state["project_id"] = uuid.uuid4().hex
+    _persist_current_state()
     payload = _serialize_model(model)
     payload["loaded"] = True
     payload["capture_method"] = result.capture_method
+    payload["project_id"] = _state["project_id"]
     return jsonify(payload)
 
 
@@ -269,10 +298,67 @@ def upload_bundle_route():
 
     _state["model"] = model
     _state["queue"] = build_review_queue(model)
+    _state["project_id"] = upload_id
+    _persist_current_state()
     payload = _serialize_model(model)
     payload["loaded"] = True
     payload["capture_method"] = result.capture_method
+    payload["project_id"] = _state["project_id"]
     return jsonify(payload)
+
+
+@app.route("/api/projects", methods=["GET"])
+def list_projects_route():
+    projects = storage.list_projects(_DB_PATH)
+    return jsonify(
+        {
+            "projects": [
+                {
+                    "project_id": p.project_id,
+                    "building_id": p.building_id,
+                    "updated_at": p.updated_at,
+                    "active": p.project_id == _state["project_id"],
+                }
+                for p in projects
+            ]
+        }
+    )
+
+
+@app.route("/api/projects/<project_id>/activate", methods=["POST"])
+def activate_project_route(project_id):
+    """Resumes a previously saved project -- the actual 'survive a
+    restart' path. Loading a new bundle (load_bundle_route /
+    upload_bundle_route) always starts a fresh project instead;
+    this endpoint is for coming back to earlier work."""
+    result = storage.load_project(_DB_PATH, project_id)
+    if result is None:
+        return (
+            jsonify({"error": f"project not found: {project_id!r}"}),
+            404,
+        )
+
+    model, resolved_ids = result
+    _state["model"] = model
+    _state["queue"] = build_review_queue_with_resolved(
+        model, resolved_ids
+    )
+    _state["project_id"] = project_id
+
+    payload = _serialize_model(model)
+    payload["loaded"] = True
+    payload["project_id"] = project_id
+    return jsonify(payload)
+
+
+@app.route("/api/projects/<project_id>", methods=["DELETE"])
+def delete_project_route(project_id):
+    storage.delete_project(_DB_PATH, project_id)
+    if _state["project_id"] == project_id:
+        _state["model"] = None
+        _state["queue"] = None
+        _state["project_id"] = None
+    return jsonify({"ok": True})
 
 
 @app.route("/api/review/next", methods=["GET"])
@@ -308,6 +394,7 @@ def review_approve():
             404,
         )
     approve(model, queue, object_id)
+    _persist_current_state()
     return jsonify({"ok": True})
 
 
@@ -326,6 +413,7 @@ def review_correct_wall():
         )
     except (ValueError, KeyError) as e:
         return jsonify({"error": str(e)}), 400
+    _persist_current_state()
     return jsonify({"ok": True})
 
 
@@ -344,6 +432,7 @@ def review_correct_opening():
         )
     except (ValueError, KeyError) as e:
         return jsonify({"error": str(e)}), 400
+    _persist_current_state()
     return jsonify({"ok": True})
 
 
@@ -357,6 +446,7 @@ def review_reclassify_room():
         )
     except (ValueError, KeyError) as e:
         return jsonify({"error": str(e)}), 400
+    _persist_current_state()
     return jsonify({"ok": True})
 
 
@@ -373,6 +463,7 @@ def review_add_wall():
         new_id = add_manual_wall(model, queue, level, centerline)
     except (ValueError, KeyError, StopIteration) as e:
         return jsonify({"error": str(e)}), 400
+    _persist_current_state()
     return jsonify({"ok": True, "wall_id": new_id})
 
 
@@ -407,6 +498,7 @@ def reextract_rooms():
 
     payload = _serialize_model(model)
     payload["loaded"] = True
+    _persist_current_state()
     return jsonify(payload)
 
 

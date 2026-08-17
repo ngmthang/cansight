@@ -1,47 +1,44 @@
 """
-    Problem: turn a raw 3D point cloud (simulating a fused LiDAR/ARKit
-    mesh) into wall-candidate line segments in the 2D floor plan, plus
-    per-plane z-samples for height inference. This is the "point cloud ->
-    plan detection -> 2D wall candidates" step from V1 spec Section 5,
-    which nothing in this repo implemented yet -- wall_fitting.fit_walls()
-    has always assumed segment observation already exist as input.
+Problem: turn a raw 3D point cloud (simulating a fused LiDAR/ARKit
+mesh) into wall-candidate line segments in the 2D floor plan, plus
+per-plane z-samples for height inference. This is the "point cloud ->
+plane detection -> 2D wall candidates" step from V1 spec Section 5,
+which nothing in this repo implemented yet -- wall_fitting.fit_walls()
+has always assumed segment observations already exist as input.
 
-    Algorithm: sequential RANSAC plane segmentation.
-        1. Repeatedly: randomly sample 3 points, fit the plane through them,
-           count how many of the remaining points lie within a distance
-           tolerance of that plane (inliers). Keep the best plan found
-           over many random trials -- classic RANSAC, robust to the point
-           cloud being mostly noise/clutter relative to any one surface.
-        2. Remove that plane's inlier points from the working set and
-           repeat until too few points remain to reliably fit another
-           plane, or a max plane count is reached. This "peel off the best
-           plane, repeat" strategy is what makes it SEQUENTIAL RANSAC,
-           since single-shot RANSAC only finds one plane.
-        3. Classify each found plane by its normal: near-vertical normal
-           (normal's z-component close to 0) means the plane's surface is
-           roughly vertical -- a wall candidate. Near-horizontal normal
-           (|z-component| close to 1) means floor/ceiling, not walls --
-           those are filtered out here since height_inference.py handles
-           floor/ceiling directly from z-samples, not from plane fitting.
-        4. For each wall-candidate plane, project its inlier points onto
-           the plane's dominant horizontal direction to get a 2D line
-           segment (min/max projection = segment endpoints), and collect
-           the inliers' z-values as height_inference.py-ready z-samples.
+Algorithm: sequential RANSAC plane segmentation.
+  1. Repeatedly: randomly sample 3 points, fit the plane through them,
+     count how many of the remaining points lie within a distance
+     tolerance of that plane (inliers). Keep the best plane found
+     over many random trials -- classic RANSAC, robust to the point
+     cloud being mostly noise/clutter relative to any one surface.
+  2. Remove that plane's inlier points from the working set and
+     repeat until too few points remain to reliably fit another
+     plane, or a max plane count is reached. This "peel off the best
+     plane, repeat" strategy is what makes it SEQUENTIAL RANSAC,
+     since single-shot RANSAC only finds one plane.
+  3. Classify each found plane by its normal: near-vertical normal
+     (normal's z-component close to 0) means the plane's surface is
+     roughly vertical -- a wall candidate. Near-horizontal normal
+     (|z-component| close to 1) means floor/ceiling, not walls --
+     those are filtered out here since height_inference.py handles
+     floor/ceiling directly from z-samples, not from plane fitting.
+  4. For each wall-candidate plane, project its inlier points onto
+     the plane's dominant horizontal direction to get a 2D line
+     segment (min/max projection = segment endpoints), and collect
+     the inliers' z-values as height_inference.py-ready z-samples.
 
-    Same "fit robustly, ignore outliers via inlier counting" idea as
-    wall_fitting.py's clustering and height_inference.py's density
-    thresholding -- just extended to full 3D since raw point-cloud data
-    has no pre-existing structure to cluster by angle/offset the raw 2D
-    segment observations do.
-
-    :author: Minh Thang Nguyen
-    :version: August 12, 2026
+Same "fit robustly, ignore outliers via inlier counting" idea as
+wall_fitting.py's clustering and height_inference.py's density
+thresholding -- just extended to full 3D since raw point-cloud data
+has no pre-existing structure to cluster by angle/offset the way 2D
+segment observations do.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
-import random, math
-
+from dataclasses import dataclass, field
+import random
+import math
 
 Point3D = tuple[float, float, float]
 Vector3D = tuple[float, float, float]
@@ -92,7 +89,7 @@ def _dot(a: Vector3D, b: Vector3D) -> float:
 
 
 def _fit_plane(
-        p1: Point3D, p2: Point3D, p3: Point3D
+    p1: Point3D, p2: Point3D, p3: Point3D
 ) -> tuple[Vector3D, float] | None:
     """Returns (unit_normal, d) for plane normal . x = d, or None if
     the three points are collinear/degenerate."""
@@ -105,18 +102,18 @@ def _fit_plane(
 
 
 def _point_plane_distance(
-        p: Point3D, normal: Vector3D, d: float
+    p: Point3D, normal: Vector3D, d: float
 ) -> float:
     return abs(_dot(normal, p) - d)
 
 
 def ransac_plane_segmentation(
-        points: list[Point3D],
-        distance_threshold: float = 0.03,
-        min_inliers: int = 20,
-        max_planes: int = 20,
-        iterations_per_plane: int = 300,
-        seed: int | None = None,
+    points: list[Point3D],
+    distance_threshold: float = 0.03,
+    min_inliers: int = 20,
+    max_planes: int = 20,
+    iterations_per_plane: int = 300,
+    seed: int | None = None,
 ) -> list[DetectedPlane]:
     """Sequential RANSAC: repeatedly find the best-supported plane in
     the remaining points, remove its inliers, repeat."""
@@ -124,7 +121,7 @@ def ransac_plane_segmentation(
     remaining = list(points)
     planes: list[DetectedPlane] = []
 
-    while(
+    while (
         len(remaining) >= max(min_inliers, 3)
         and len(planes) < max_planes
     ):
@@ -139,7 +136,8 @@ def ransac_plane_segmentation(
                 continue
             normal, d = fit
             inlier_idx = [
-                i for i, p in enumerate(remaining)
+                i
+                for i, p in enumerate(remaining)
                 if _point_plane_distance(p, normal, d)
                 <= distance_threshold
             ]
@@ -148,7 +146,7 @@ def ransac_plane_segmentation(
                 best_plane = (normal, d)
 
         if best_plane is None or len(best_inlier_idx) < min_inliers:
-            break # nothing left worth calling a surface
+            break  # nothing left worth calling a surface
 
         normal, d = best_plane
         inliers = [remaining[i] for i in best_inlier_idx]
@@ -157,7 +155,9 @@ def ransac_plane_segmentation(
         cz = sum(p[2] for p in inliers) / len(inliers)
 
         planes.append(
-            DetectedPlane(inliers=inliers, normal=normal,centroid=(cx, cy, cz))
+            DetectedPlane(
+                inliers=inliers, normal=normal, centroid=(cx, cy, cz)
+            )
         )
 
         keep_set = set(best_inlier_idx)
@@ -169,20 +169,28 @@ def ransac_plane_segmentation(
 
 
 def extract_wall_candidates(
-        points: list[Point3D],
-        distance_threshold: float = 0.03,
-        min_inliers: int = 20,
+    points: list[Point3D],
+    distance_threshold: float = 0.03,
+    min_inliers: int = 20,
+    seed: int | None = None,
 ) -> list[WallCandidate]:
     """
     Full pipeline: RANSAC-segment the point cloud into planes, keep
     only the near-vertical (wall) ones, and project each onto its
     dominant horizontal direction to get a 2D segment plus z-samples
     ready for height_inference.estimate_floor_and_ceiling().
+
+    seed is passed through to ransac_plane_segmentation() for
+    reproducibility -- RANSAC's random sampling makes runs
+    non-deterministic by default (real capture data doesn't care,
+    but tests that assert exact plane counts/positions need a fixed
+    seed to be reliable rather than flaky).
     """
     planes = ransac_plane_segmentation(
         points,
-        distance_threshold = distance_threshold,
-        min_inliers = min_inliers,
+        distance_threshold=distance_threshold,
+        min_inliers=min_inliers,
+        seed=seed,
     )
 
     candidates: list[WallCandidate] = []
@@ -195,7 +203,7 @@ def extract_wall_candidates(
         nx, ny, _ = plane.normal
         along = _normalize((-ny, nx, 0.0))
         if along is None:
-            continue # degenerate (shouldn't happen for a real wall)
+            continue  # degenerate (shouldn't happen for a real wall)
 
         cx, cy, _ = plane.centroid
         projections = [
@@ -210,7 +218,7 @@ def extract_wall_candidates(
             WallCandidate(
                 segment=(p_start, p_end),
                 z_samples=[p[2] for p in plane.inliers],
-                inlier_count=len(plane.inliers)
+                inlier_count=len(plane.inliers),
             )
         )
 

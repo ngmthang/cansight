@@ -1,13 +1,10 @@
 """
-    Universal Building Model — core data classes.
+Universal Building Model — core data classes.
 
-    This is the source of truth described in the V1 spec, Section 12/13.
-    Every downstream system (geometry pipeline, review UI, IFC export)
-    reads and writes this representation — nothing talks to raw point
-    clouds except the geometry pipeline itself.
-
-    :author: Minh Thang Nguyen
-    :version: August 11, 2026
+This is the source of truth described in the V1 spec, Section 12/13.
+Every downstream system (geometry pipeline, review UI, IFC export)
+reads and writes this representation — nothing talks to raw point
+clouds except the geometry pipeline itself.
 """
 
 from __future__ import annotations
@@ -447,3 +444,117 @@ class BuildingModel:
             with open(path, "w") as f:
                 f.write(text)
         return text
+
+    @classmethod
+    def from_json(cls, json_str: str) -> "BuildingModel":
+        """Reconstructs a full BuildingModel from to_json()'s output --
+        the reverse direction, needed for anything that persists a
+        model and reloads it later (see webapp/storage.py)."""
+        data = json.loads(json_str)
+        model = cls(
+            building_id=data["building_id"],
+            model_version=data.get("model_version", "1.0"),
+        )
+
+        for level_id, level_data in data["levels"].items():
+            model.levels[level_id] = Level(
+                id=level_data["id"],
+                elevation=level_data.get("elevation", 0.0),
+                rooms=list(level_data.get("rooms", [])),
+                walls=list(level_data.get("walls", [])),
+                doors=list(level_data.get("doors", [])),
+                windows=list(level_data.get("windows", [])),
+                floors=list(level_data.get("floors", [])),
+                ceilings=list(level_data.get("ceilings", [])),
+            )
+
+        for obj_id, obj_data in data["objects"].items():
+            model.objects[obj_id] = _object_from_dict(obj_data)
+
+        for rel_data in data["relationships"]:
+            model.relationships.append(
+                Relationship(
+                    type=RelationType(rel_data["type"]),
+                    from_id=rel_data["from"],
+                    to_id=rel_data["to"],
+                )
+            )
+
+        return model
+
+
+def _object_from_dict(d: dict) -> BuildingObject:
+    """Dispatches a single object's dict (from to_json()'s "objects"
+    section) to the right dataclass based on its "type" field."""
+    d = dict(d)  # don't mutate the caller's dict
+    obj_type = d.pop("type")
+    provenance_data = d.pop("provenance", {})
+    provenance = Provenance(**provenance_data)
+
+    common = dict(
+        id=d.pop("id"),
+        level=d.pop("level"),
+        confidence=d.pop("confidence", 1.0),
+        provenance=provenance,
+    )
+
+    if obj_type == "wall":
+        return Wall(
+            type=ObjectType.WALL,
+            centerline=[tuple(p) for p in d["centerline"]],
+            thickness=d["thickness"],
+            height=d["height"],
+            material=d.get("material"),
+            room_side_a=d.get("room_side_a"),
+            room_side_b=d.get("room_side_b"),
+            **common,
+        )
+    elif obj_type == "door":
+        return Door(
+            type=ObjectType.DOOR,
+            host_wall_id=d["host_wall_id"],
+            width=d["width"],
+            height=d["height"],
+            sill_height=d.get("sill_height", 0.0),
+            position_on_wall=d.get("position_on_wall", 0.5),
+            swing=d.get("swing"),
+            **common,
+        )
+    elif obj_type == "window":
+        return Window(
+            type=ObjectType.WINDOW,
+            host_wall_id=d["host_wall_id"],
+            width=d["width"],
+            height=d["height"],
+            sill_height=d.get("sill_height", 0.9),
+            position_on_wall=d.get("position_on_wall", 0.5),
+            head_height=d.get("head_height", 2.0),
+            **common,
+        )
+    elif obj_type == "room":
+        return Room(
+            type=ObjectType.ROOM,
+            boundary=[tuple(p) for p in d["boundary"]],
+            classification=d.get("classification", "other"),
+            bounded_by=list(d.get("bounded_by", [])),
+            contains=list(d.get("contains", [])),
+            floor_elevation=d.get("floor_elevation", 0.0),
+            ceiling_elevation=d.get("ceiling_elevation", 2.4),
+            **common,
+        )
+    elif obj_type == "floor":
+        return Floor(
+            type=ObjectType.FLOOR,
+            boundary=[tuple(p) for p in d["boundary"]],
+            elevation=d.get("elevation", 0.0),
+            **common,
+        )
+    elif obj_type == "ceiling":
+        return Ceiling(
+            type=ObjectType.CEILING,
+            boundary=[tuple(p) for p in d["boundary"]],
+            elevation=d.get("elevation", 0.0),
+            **common,
+        )
+    else:
+        raise ValueError(f"Unknown object type in JSON: {obj_type!r}")

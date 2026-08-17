@@ -142,6 +142,7 @@ def ingest_capture(
     bundle_dir: str,
     ransac_distance_threshold: float = 0.03,
     ransac_min_inliers: int = 20,
+    ransac_seed: int | None = None,
 ) -> IngestedCapture:
     """
     Dispatches on manifest.capture_method:
@@ -151,6 +152,12 @@ def ingest_capture(
                                  already found the walls; just fit
                                  lines through their sparse boundary
                                  vertices (non-LiDAR fallback devices)
+
+    ransac_seed is None (non-deterministic) by default -- fine for
+    real captures. Tests that assert exact wall counts/positions
+    should pass a fixed seed, or RANSAC's inherent randomness makes
+    the assertion flaky (this was a real bug found during
+    development: see tests/test_capture_ingestion.py history).
     """
     manifest_path = os.path.join(bundle_dir, "manifest.json")
     with open(manifest_path) as f:
@@ -159,7 +166,10 @@ def ingest_capture(
 
     if capture_method == "lidar_mesh":
         return _ingest_lidar_mesh_bundle(
-            bundle_dir, ransac_distance_threshold, ransac_min_inliers
+            bundle_dir,
+            ransac_distance_threshold,
+            ransac_min_inliers,
+            ransac_seed,
         )
     elif capture_method == "arkit_plane_detection":
         return _ingest_plane_detection_bundle(bundle_dir)
@@ -171,6 +181,7 @@ def _ingest_lidar_mesh_bundle(
     bundle_dir: str,
     ransac_distance_threshold: float,
     ransac_min_inliers: int,
+    ransac_seed: int | None = None,
 ) -> IngestedCapture:
     """
     Full ingestion: load a capture bundle from disk, run it through
@@ -191,6 +202,7 @@ def _ingest_lidar_mesh_bundle(
         points,
         distance_threshold=ransac_distance_threshold,
         min_inliers=ransac_min_inliers,
+        seed=ransac_seed,
     )
     if not wall_candidates:
         raise ValueError(

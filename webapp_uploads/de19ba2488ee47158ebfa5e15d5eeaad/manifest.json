@@ -1,0 +1,9 @@
+{
+  "session_id": "s",
+  "device_model": "iPhone 15 Pro",
+  "capture_timestamp": "t",
+  "coordinate_frame": "arkit_world_y_up_meters",
+  "capture_method": "lidar_mesh",
+  "point_count": 600,
+  "plane_count": 0
+}
