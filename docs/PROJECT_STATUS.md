@@ -48,7 +48,11 @@ review/correction_session.py -- apply human corrections
 review/formatting.py -- unit-aware display strings
 units.py -- feet/inches <-> meters
 v
-export/ifc_export.py -- validated IFC4 output
+export/ifc_export.py -- validated IFC4 output (-> Revit,
+via Revit's native IFC import)
+export/dxf_export.py -- DXF floor plan (-> AutoCAD
+directly, -> SketchUp via its
+built-in DXF import)
 webapp/server.py + static/ -- local browser UI over all of the above
 webapp/storage.py -- SQLite persistence (multi-project,
 survives restart)
@@ -58,9 +62,17 @@ Every algorithm above is original, from-scratch, and unit-tested.
 Nothing in this chain calls RoomPlan or any other third-party
 detection API.
 
+**Export coverage:** all three originally-requested CAD/BIM targets
+(AutoCAD, Revit, SketchUp) now have a real path -- two of them
+sharing a single DXF exporter rather than three separate efforts.
+No native `.rvt`/`.skp` writers exist (those would need the Revit
+API in C#/.NET, and SketchUp's own SDK, respectively -- see
+`docs/BACKLOG.md` if that level of native integration ever becomes
+worth the much larger effort it requires).
+
 ---
 
-## 3. What's Built and Tested (87/87 passing as of this handoff)
+## 3. What's Built and Tested (96/96 passing as of this handoff)
 
 | Area | File(s) | Tests |
 |---|---|---|
@@ -70,7 +82,8 @@ detection API.
 | 3D extension (floor/ceiling/volume, opening containment) | `building_model/schema.py`, `geometry/height_inference.py` | 11 |
 | LiDAR capture ingestion (RANSAC) | `geometry/plane_detection.py`, `capture_ingestion.py` | 10 |
 | Non-LiDAR capture ingestion (sparse plane fitting) | `capture_ingestion.py` | 9 |
-| Web review UI backend + persistence (Flask API, SQLite, bundle upload) | `webapp/server.py`, `webapp/storage.py` | 21 |
+| Web review UI backend + persistence (Flask API, SQLite, bundle upload) | `webapp/server.py`, `webapp/storage.py` | 22 |
+| DXF export (AutoCAD/SketchUp) | `export/dxf_export.py` | 8 |
 
 Run everything:
 ```powershell
@@ -82,6 +95,7 @@ python tests\test_3d_extension.py
 python tests\test_capture_ingestion.py
 python tests\test_non_lidar_capture.py
 python tests\test_webapp.py
+python tests\test_dxf_export.py
 ```
 
 Run the web UI locally:
@@ -161,41 +175,70 @@ gaps not yet in that file:
   but not "multiple people accessing the same project
   concurrently." Fine for the current solo-use scope; would need
   real client-server separation for team use.
+- **OPEN, UNRESOLVED: iOS plane/mesh visualization overlay doesn't
+  render.** `CaptureView.swift`'s `ARPassthroughView` was rebuilt
+  to fix a real bug (both `ARCaptureSession` and `ARSCNView`
+  fighting over the single `ARSession.delegate` slot, which
+  silently starved the view of anchor events -- fixed by having
+  `Coordinator` own that slot and forward events to
+  `ARCaptureSession`). After that fix, the progress counter
+  confirmed anchor events ARE firing, but a diagnostic test (a
+  solid red sphere locked to the camera via
+  `renderer(_:updateAtTime:)`, with zero dependency on
+  plane/mesh detection) STILL did not render on-screen. This
+  points at something more fundamental in the SceneKit rendering
+  pipeline than the anchor-visualization code itself -- genuinely
+  unresolved, paused mid-investigation ("hold it for now") rather
+  than fixed. Next diagnostic step, if picked back up: check
+  whether the camera feed itself looks like a live video (vs. a
+  static frame), to help distinguish "3D compositing is broken"
+  from "something more basic in the AR session/rendering setup."
 
 ---
 
 ## 6. Practical Path Forward (recommended priority order)
 
 Completed since this document was first written: bundle upload
-(zip, with zip-slip protection and nested-folder handling) and
+(zip, with zip-slip protection and nested-folder handling),
 SQLite-backed persistence (multi-project, survives restart,
 correctly distinguishes "human reviewed this" from "confidence
 happens to be high" -- see `ReviewQueue.resolved_ids()`'s
-docstring for the bug this specifically avoids).
+docstring for the bug this specifically avoids), and DXF export
+(AutoCAD directly, SketchUp via its built-in DXF import -- see
+Section 2's "Export coverage" note).
 
 If continuing to build toward actual organizational use (per the
 original stated goal), in priority order:
 
-1. **Grow the real-capture regression corpus** -- formalize 1-2 of
+1. **Resolve the open iOS rendering bug** (Section 5) -- currently
+   paused mid-diagnosis. The plane/mesh visual feedback feature is
+   otherwise architecturally complete (delegate-forwarding is
+   fixed and confirmed working); only the actual on-screen
+   rendering remains unexplained.
+2. **Grow the real-capture regression corpus** -- formalize 1-2 of
    the real bundles already captured into permanent test fixtures,
    so future calibration drift (like the non-LiDAR clustering
    tolerance fix) gets caught automatically instead of requiring
    another live debugging session.
-2. **Real Xcode/Mac access**, whenever feasible, to validate the
+3. **Real Xcode/Mac access**, whenever feasible, to validate the
    LiDAR capture path (`ARCaptureSession.swift`'s primary mode) on
    real hardware -- currently completely unverified.
-3. Everything in `docs/BACKLOG.md` (furniture-aware detection) and
+4. Everything in `docs/BACKLOG.md` (furniture-aware detection) and
    the "Explicitly NOT implemented" list in `ios/README.md`
    (guided coverage UI, multi-room stitching, upload/networking).
-4. If/when multiple people need concurrent access:
+5. If/when multiple people need concurrent access:
    `webapp/storage.py`'s SQLite layer would need to become a real
    client-server backend -- not urgent at current (solo) scale.
+6. **Native Revit/SketchUp exporters**, if the IFC/DXF-import paths
+   ever prove insufficient -- a much larger, separate undertaking
+   (Revit API in C#/.NET; SketchUp's own SDK), not something to
+   start casually.
 
 ---
 
 ## 7. How to Continue
 
 This repo is at `https://github.com/ngmthang/cansight` (folder
-`reality-capture-bim/`). Clone/pull, confirm all 87 tests pass
+`reality-capture-bim/`). Clone/pull, confirm all 96 tests pass
 locally, then pick up from Section 6's priority list, or address
 whatever specific need prompted returning to this project.
