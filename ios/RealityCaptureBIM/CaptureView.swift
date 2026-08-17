@@ -18,46 +18,63 @@ import ARKit
 import SceneKit
 
 struct ARPassthroughView: UIViewRepresentable {
-    let session: ARSession
+    let captureSession: ARCaptureSession
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(captureSession: captureSession)
     }
 
     func makeUIView(context: Context) -> ARSCNView {
         let view = ARSCNView(frame: .zero)
-        view.session = session
+        view.session = captureSession.session
         view.automaticallyUpdatesLighting = true
         view.delegate = context.coordinator
-
-        if ARCaptureSession.supportsLiDAR {
-            // Apple's built-in mesh visualization -- draws the
-            // detected scene geometry directly as an overlay. No
-            // custom rendering code needed for LiDAR mode.
-            view.debugOptions = [.showSceneUnderstanding]
-        }
-
         return view
     }
 
     func updateUIView(_ uiView: ARSCNView, context: Context) {}
 
-    /// Handles live plane visualization for non-LiDAR
-    /// (plane-detection) mode. LiDAR mode uses
-    /// ARSCNDebugOptions.showSceneUnderstanding instead (set in
-    /// makeUIView), which needs no custom rendering.
+    /// Renders live visual feedback of whatever ARKit has detected
+    /// so far: LiDAR mode gets a wireframe mesh overlay built
+    /// directly from ARMeshAnchor geometry (SceneKit, unlike
+    /// RealityKit's ARView, has no built-in
+    /// ".showSceneUnderstanding" debug option -- that's a
+    /// RealityKit-only feature, confirmed the hard way when this
+    /// was first tried). Non-LiDAR mode renders each detected
+    /// ARPlaneAnchor as a colored overlay.
+    ///
+    /// This class is also the ONE place that owns
+    /// ARSession.delegate (indirectly, by being ARSCNViewDelegate)
+    /// -- it forwards every anchor event to ARCaptureSession so its
+    /// own tracking (progress counter, point-cloud/plane
+    /// extraction) still works. Splitting anchor-handling between
+    /// two separate delegates was the original bug here: only one
+    /// object can ever be ARSession.delegate, so ARCaptureSession
+    /// claiming it directly silently starved ARSCNView of anchor
+    /// notifications, and no overlay was ever drawn.
     class Coordinator: NSObject, ARSCNViewDelegate {
+        let captureSession: ARCaptureSession
+
+        init(captureSession: ARCaptureSession) {
+            self.captureSession = captureSession
+        }
+
         func renderer(
             _ renderer: SCNSceneRenderer,
             didAdd node: SCNNode,
             for anchor: ARAnchor
         ) {
-            guard let planeAnchor = anchor as? ARPlaneAnchor else {
-                return
+            captureSession.handleAnchorsAdded([anchor])
+
+            if let planeAnchor = anchor as? ARPlaneAnchor {
+                node.addChildNode(
+                    Self.planeVisualization(for: planeAnchor)
+                )
+            } else if let meshAnchor = anchor as? ARMeshAnchor {
+                node.addChildNode(
+                    Self.meshVisualization(for: meshAnchor)
+                )
             }
-            node.addChildNode(
-                Self.planeVisualization(for: planeAnchor)
-            )
         }
 
         func renderer(
@@ -65,52 +82,99 @@ struct ARPassthroughView: UIViewRepresentable {
             didUpdate node: SCNNode,
             for anchor: ARAnchor
         ) {
-            guard let planeAnchor = anchor as? ARPlaneAnchor,
+            captureSession.handleAnchorsUpdated([anchor])
+
+            if let planeAnchor = anchor as? ARPlaneAnchor,
                 let planeNode = node.childNodes.first,
                 let plane = planeNode.geometry as? SCNPlane
-            else { return }
+            {
+                // planeExtent is the modern (iOS 16+) replacement
+                // for the deprecated .extent SIMD3<Float>.
+                plane.width = CGFloat(planeAnchor.planeExtent.width)
+                plane.height = CGFloat(planeAnchor.planeExtent.height)
+                planeNode.simdPosition = planeAnchor.center
+            } else if let meshAnchor = anchor as? ARMeshAnchor {
+                node.childNodes.forEach { $0.removeFromParentNode() }
+                node.addChildNode(
+                    Self.meshVisualization(for: meshAnchor)
+                )
+            }
+        }
 
-            // ARKit refines a plane's extent continuously as it
-            // sees more of the surface -- keep the overlay in sync
-            // so the user sees detection improve live, not just a
-            // one-shot guess.
-            plane.width = CGFloat(planeAnchor.extent.x)
-            plane.height = CGFloat(planeAnchor.extent.z)
-            planeNode.simdPosition = planeAnchor.center
+        func renderer(
+            _ renderer: SCNSceneRenderer,
+            didRemove node: SCNNode,
+            for anchor: ARAnchor
+        ) {
+            captureSession.handleAnchorsRemoved([anchor])
         }
 
         private static func planeVisualization(
             for planeAnchor: ARPlaneAnchor
         ) -> SCNNode {
             let plane = SCNPlane(
-                width: CGFloat(planeAnchor.extent.x),
-                height: CGFloat(planeAnchor.extent.z)
+                width: CGFloat(planeAnchor.planeExtent.width),
+                height: CGFloat(planeAnchor.planeExtent.height)
             )
             let material = SCNMaterial()
-            // blue = wall (vertical), green = floor/ceiling
-            // (horizontal) -- same color convention as the web
-            // review UI's confidence coloring, so a user who later
-            // reviews the same capture in the browser sees a
-            // consistent visual language
             material.diffuse.contents =
                 planeAnchor.alignment == .vertical
                 ? UIColor.systemBlue.withAlphaComponent(0.35)
                 : UIColor.systemGreen.withAlphaComponent(0.35)
             material.isDoubleSided = true
+            // Unlit: renders at the exact set color regardless of
+            // ARKit's estimated ambient lighting. Without this, a
+            // semi-transparent overlay can render nearly invisible
+            // under realistic (dim/uneven) room lighting -- a known
+            // AR debug-overlay pitfall, and the actual fix Apple's
+            // own plane-visualization sample code uses.
+            material.lightingModel = .constant
             plane.materials = [material]
 
             let planeNode = SCNNode(geometry: plane)
             planeNode.simdPosition = planeAnchor.center
-            // SCNPlane lies in the local XY plane by default (normal
-            // along Z); ARKit's plane anchors define their extent
-            // along local X/Z (normal along Y) regardless of whether
-            // the anchor represents a vertical or horizontal
-            // real-world surface -- the anchor's own transform
-            // handles the actual world-space orientation. Standard
-            // rotation from Apple's own ARKit plane-visualization
-            // sample code.
             planeNode.eulerAngles.x = -.pi / 2
             return planeNode
+        }
+
+        private static func meshVisualization(
+            for meshAnchor: ARMeshAnchor
+        ) -> SCNNode {
+            let geometry = meshAnchor.geometry
+
+            let vertexSource = SCNGeometrySource(
+                buffer: geometry.vertices.buffer,
+                vertexFormat: geometry.vertices.format,
+                semantic: .vertex,
+                vertexCount: geometry.vertices.count,
+                dataOffset: geometry.vertices.offset,
+                dataStride: geometry.vertices.stride
+            )
+
+            let faces = geometry.faces
+            let facesData = Data(
+                bytes: faces.buffer.contents(),
+                count: faces.buffer.length
+            )
+            let element = SCNGeometryElement(
+                data: facesData,
+                primitiveType: .triangles,
+                primitiveCount: faces.count,
+                bytesPerIndex: faces.bytesPerIndex
+            )
+
+            let scnGeometry = SCNGeometry(
+                sources: [vertexSource], elements: [element]
+            )
+            let material = SCNMaterial()
+            material.fillMode = .lines  // wireframe, not solid fill
+            material.diffuse.contents = UIColor.cyan
+            material.isDoubleSided = true
+            material.lightingModel = .constant  // same unlit fix as
+            // planeVisualization -- see that comment for why
+            scnGeometry.materials = [material]
+
+            return SCNNode(geometry: scnGeometry)
         }
     }
 }
@@ -120,7 +184,7 @@ struct CaptureView: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            ARPassthroughView(session: viewModel.captureSession.session)
+            ARPassthroughView(captureSession: viewModel.captureSession)
                 .ignoresSafeArea()
 
             VStack(spacing: 12) {

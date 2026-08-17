@@ -51,9 +51,9 @@ from geometry.capture_ingestion import (
     build_building_model_from_capture,
 )
 from geometry.room_extraction import extract_rooms
-from export.ifc_export import export_to_ifc
-import units
 import webapp.storage as storage
+from export.ifc_export import export_to_ifc
+from export.dxf_export import export_to_dxf
 
 app = Flask(__name__)
 
@@ -524,6 +524,35 @@ def export_ifc_route():
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, f"{model.building_id}.ifc")
     warnings = export_to_ifc(model, out_path)
+    return jsonify({"ok": True, "path": out_path, "warnings": warnings})
+
+
+@app.route("/api/export_dxf", methods=["POST"])
+def export_dxf_route():
+    """DXF export: AutoCAD's native format, and importable directly
+    into SketchUp too (built-in DXF import) -- see
+    export/dxf_export.py's module docstring for why one exporter
+    covers both targets."""
+    model = _require_model()
+    errors = model.validate()
+    if errors:
+        return (
+            jsonify(
+                {
+                    "error": "Model has validation errors",
+                    "details": errors,
+                }
+            ),
+            400,
+        )
+
+    out_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "webapp_exports",
+    )
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"{model.building_id}.dxf")
+    warnings = export_to_dxf(model, out_path)
     return jsonify({"ok": True, "path": out_path, "warnings": warnings})
 
 

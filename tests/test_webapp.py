@@ -215,6 +215,20 @@ def test_export_ifc_via_api():
     assert os.path.exists(data["path"])
 
 
+def test_export_dxf_via_api():
+    client = _make_client()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bundle_dir = _make_lidar_bundle_dir(tmpdir)
+        client.post("/api/load_bundle", json={"bundle_dir": bundle_dir})
+
+    resp = client.post("/api/export_dxf")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert os.path.exists(data["path"])
+    assert data["path"].endswith(".dxf")
+
+
 def test_operations_before_load_return_error():
     client = _make_client()
     resp = client.get("/api/review/next")

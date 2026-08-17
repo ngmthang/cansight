@@ -56,7 +56,7 @@ enum CaptureMode {
     case planeDetection
 }
 
-final class ARCaptureSession: NSObject, ARSessionDelegate {
+final class ARCaptureSession: NSObject {
 
     /// Exposed (not private) so a SwiftUI view can bind an ARSCNView
     /// to this exact session, giving the user a live camera
@@ -100,7 +100,19 @@ final class ARCaptureSession: NSObject, ARSessionDelegate {
             configuration.environmentTexturing = .none
         }
 
-        session.delegate = self
+        // Deliberately NOT setting session.delegate here.
+        // ARSession.delegate is a single slot -- if this class
+        // claimed it, ARSCNView (in CaptureView.swift) would never
+        // receive anchor add/update notifications itself, and its
+        // renderer(_:didAdd:for:) visualization callbacks would
+        // silently never fire (this was a real bug: scanning and
+        // the progress counter worked, since those came from this
+        // class's own tracking, but the plane/mesh overlays never
+        // appeared, since ARSCNView never found out about new
+        // anchors at all). Instead, ARPassthroughView.Coordinator
+        // owns session.delegate (indirectly, via being
+        // ARSCNViewDelegate) and forwards anchor events here via
+        // handleAnchorsAdded/Updated/Removed below.
         session.run(configuration)
     }
 
@@ -108,17 +120,19 @@ final class ARCaptureSession: NSObject, ARSessionDelegate {
         session.pause()
     }
 
-    // MARK: - ARSessionDelegate
+    // MARK: - Anchor event handling (forwarded from
+    // ARPassthroughView.Coordinator, not from ARSessionDelegate --
+    // see the comment in start() for why)
 
-    func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+    func handleAnchorsAdded(_ anchors: [ARAnchor]) {
         updateAnchors(anchors)
     }
 
-    func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+    func handleAnchorsUpdated(_ anchors: [ARAnchor]) {
         updateAnchors(anchors)
     }
 
-    func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
+    func handleAnchorsRemoved(_ anchors: [ARAnchor]) {
         for anchor in anchors {
             if let meshAnchor = anchor as? ARMeshAnchor {
                 meshAnchors.removeValue(forKey: meshAnchor.identifier)
