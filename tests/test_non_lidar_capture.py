@@ -264,6 +264,59 @@ def test_old_style_bundle_defaults_to_lidar_mesh():
     assert manifest.capture_method == "lidar_mesh"
 
 
+def test_short_vertical_plane_filtered_as_false_positive():
+    """Real scenario found via real-device testing: ARKit's plane
+    detector has no semantic understanding of what it's looking at,
+    so a monitor screen (or picture frame, whiteboard, etc.) --
+    flat and vertical, just like a real wall -- can get reported as
+    a "wall" candidate. The discriminating signal: a real wall,
+    however narrow horizontally, spans close to full room height;
+    a monitor is short regardless of width. This builds a normal
+    4-wall room PLUS one monitor-sized plane (wide, but only 25cm
+    tall) and confirms the monitor gets filtered out while all 4
+    real walls survive."""
+    planes = _synthetic_room_planes()
+    monitor_plane = {
+        "alignment": "vertical",
+        "boundary_vertices": _wall_corners(
+            2.0, 0, 2.6, 0, y_range=(1.0, 1.25)
+        ),  # 0.6m wide, only 0.25m tall -- monitor-shaped
+    }
+    planes.append(monitor_plane)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bd = os.path.join(tmpdir, "room_with_monitor")
+        write_plane_bundle(bd, "s", "iPhone 8", "t", planes)
+        result = ingest_capture(bd)
+
+    # still exactly 4 real walls -- the monitor didn't sneak in as
+    # a 5th "wall" and didn't corrupt any of the real ones
+    assert len(result.fitted_walls) == 4
+
+
+def test_bundle_with_only_short_planes_raises():
+    """If every vertical plane in a bundle is too short to
+    plausibly be a wall, ingestion should fail clearly rather than
+    silently produce a building made entirely of monitor-sized
+    fragments."""
+    planes = [
+        {
+            "alignment": "vertical",
+            "boundary_vertices": _wall_corners(
+                0, 0, 1, 0, y_range=(1.0, 1.2)
+            ),
+        }
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bd = os.path.join(tmpdir, "all_short")
+        write_plane_bundle(bd, "s", "d", "t", planes)
+        try:
+            ingest_capture(bd)
+            assert False, "should have raised ValueError"
+        except ValueError as e:
+            assert "tall enough" in str(e)
+
+
 if __name__ == "__main__":
     tests = [
         v for k, v in list(globals().items()) if k.startswith("test_")

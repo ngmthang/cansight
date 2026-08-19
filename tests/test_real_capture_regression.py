@@ -51,13 +51,22 @@ def test_real_capture_ingests_without_error():
 
 
 def test_real_capture_wall_count():
-    """Locks in the current, verified-correct wall count after the
-    angle_tol_deg=25/offset_tol=0.25 clustering fix (see
-    docs/PROJECT_STATUS.md Section 4, item 1). Before that fix, this
-    same fixture produced 17 unclustered fragments instead of 8
-    properly-merged walls."""
+    """Locks in the current, verified-correct wall count. History:
+    - Originally 17 unclustered fragments (before the
+      angle_tol_deg=25/offset_tol=0.25 clustering fix).
+    - Then 8 walls after that fix.
+    - Now 7 walls: one of those 8 was a false positive -- a short
+      vertical plane (0.95m wide but only 0.267m tall) that was
+      almost certainly a monitor screen or similar flat object,
+      not a real wall (confirmed via real-device testing: a
+      monitor really was misdetected and visualized as a wall
+      during a live capture session). Fixed by filtering vertical
+      planes under MIN_WALL_VERTICAL_EXTENT=0.5m in
+      _ingest_plane_detection_bundle -- see that function's
+      comment for the reasoning and the real data this threshold
+      was derived from."""
     result = ingest_capture(FIXTURE_DIR)
-    assert len(result.fitted_walls) == 8
+    assert len(result.fitted_walls) == 7
 
 
 def test_real_capture_height_estimate_is_plausible():
@@ -90,7 +99,7 @@ def test_real_capture_wall_confidences_stay_non_lidar_capped():
         for o in bm.objects.values()
         if o.type.value == "wall"
     ]
-    assert len(wall_confidences) == 8
+    assert len(wall_confidences) == 7
     assert all(c <= 0.6 for c in wall_confidences)
 
 

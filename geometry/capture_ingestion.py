@@ -32,6 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import os
+import math
 
 from geometry.plane_detection import extract_wall_candidates
 from geometry.wall_fitting import (
@@ -337,12 +338,40 @@ def _ingest_plane_detection_bundle(bundle_dir: str) -> IngestedCapture:
             f"(walls) detected -- nothing to build a model from"
         )
 
+    # ARKit's ARPlaneAnchor detection is purely geometric -- it has
+    # no semantic understanding of what a surface actually is, so
+    # any sufficiently flat, sufficiently large vertical object
+    # (a monitor screen, a picture frame, a whiteboard) gets
+    # reported exactly like a real wall would (confirmed by a real
+    # capture session: a monitor screen was detected and visualized
+    # as if it were a wall segment). The discriminating signal that
+    # actually works: a real wall, however narrow horizontally,
+    # spans close to full room height, while a monitor/picture
+    # frame/similar object is short regardless of its width.
+    # Threshold derived from tests/fixtures/real_ipad_capture_1's
+    # real data: every genuine wall segment there spans >= 0.7m
+    # vertically; one clear false positive (a likely monitor) spans
+    # only 0.267m despite being 0.95m wide.
+    MIN_WALL_VERTICAL_EXTENT = 0.5  # meters
+
     segments = []
     all_z: list[float] = []
     for p in vertical_planes:
         verts = p["boundary_vertices"]
+        z_values = [v[2] for v in verts]
+        vertical_extent = max(z_values) - min(z_values)
+        if vertical_extent < MIN_WALL_VERTICAL_EXTENT:
+            continue  # too short to plausibly be a wall segment
         segments.append(_wall_segment_from_vertical_plane(verts))
-        all_z.extend(v[2] for v in verts)
+        all_z.extend(z_values)
+
+    if not segments:
+        raise ValueError(
+            f"bundle {manifest.session_id!r}: no vertical planes "
+            f"tall enough to plausibly be walls (all under "
+            f"{MIN_WALL_VERTICAL_EXTENT}m) -- nothing to build a "
+            f"model from"
+        )
 
     for p in planes:
         if p["alignment"] == "horizontal":

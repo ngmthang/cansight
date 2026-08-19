@@ -10,7 +10,15 @@
 //  "guided coverage" concept) -- what's here is visual feedback of
 //  detected surfaces, not a completeness score.
 //
-//  REFERENCE / UNVERIFIED -- see ARCaptureSession.swift's header.
+//  STATUS: plane/mesh visualization confirmed working on real
+//  hardware (iPad A16, non-LiDAR plane-detection mode) as of this
+//  version -- see docs/PROJECT_STATUS.md Section 4/5 for the real-
+//  device debugging session that resolved the earlier
+//  ARSession.delegate conflict bug. The fill+outline overlay
+//  styling in this specific version has NOT yet been re-verified
+//  on-device (only the prior solid-color diagnostic version was
+//  confirmed) -- expect to fix minor issues if any come up when
+//  testing this update.
 //
 
 import SwiftUI
@@ -85,15 +93,39 @@ struct ARPassthroughView: UIViewRepresentable {
             captureSession.handleAnchorsUpdated([anchor])
 
             if let planeAnchor = anchor as? ARPlaneAnchor,
-                let planeNode = node.childNodes.first,
-                let plane = planeNode.geometry as? SCNPlane
+                let container = node.childNodes.first
             {
-                // planeExtent is the modern (iOS 16+) replacement
-                // for the deprecated .extent SIMD3<Float>.
-                plane.width = CGFloat(planeAnchor.planeExtent.width)
-                plane.height = CGFloat(planeAnchor.planeExtent.height)
-                planeNode.simdPosition = planeAnchor.center
+                // ARKit refines a plane's extent continuously as it
+                // sees more of the surface -- keep the overlay in
+                // sync so the user sees detection improve live.
+                container.simdPosition = planeAnchor.center
+                let width = CGFloat(planeAnchor.planeExtent.width)
+                let height = CGFloat(planeAnchor.planeExtent.height)
+                let color =
+                    planeAnchor.alignment == .vertical
+                    ? UIColor.systemBlue : UIColor.systemGreen
+
+                if let fillNode = container.childNode(
+                    withName: "fill", recursively: false
+                ), let plane = fillNode.geometry as? SCNPlane {
+                    plane.width = width
+                    plane.height = height
+                }
+                if let outlineHolder = container.childNode(
+                    withName: "outline", recursively: false
+                ) {
+                    outlineHolder.removeFromParentNode()
+                }
+                let newOutline = Self.outlineNode(
+                    width: width, height: height, color: color
+                )
+                newOutline.name = "outline"
+                container.addChildNode(newOutline)
             } else if let meshAnchor = anchor as? ARMeshAnchor {
+                // The mesh's vertex/face count changes shape on
+                // every update -- simplest robust approach is to
+                // replace the child node's geometry wholesale
+                // rather than mutating it in place.
                 node.childNodes.forEach { $0.removeFromParentNode() }
                 node.addChildNode(
                     Self.meshVisualization(for: meshAnchor)
@@ -109,34 +141,141 @@ struct ARPassthroughView: UIViewRepresentable {
             captureSession.handleAnchorsRemoved([anchor])
         }
 
+        /// Builds a plane overlay as two layered pieces, matching
+        /// how real scanning apps (RoomPlan, Polycam, etc.) show
+        /// detected surfaces -- a LOW-opacity fill so the real
+        /// wall/door/window underneath stays visible, plus a
+        /// crisp, fully-opaque border outline so the detected
+        /// boundary still reads clearly. A single opaque fill (the
+        /// earlier diagnostic version) hides real detail like door
+        /// handles or window frames -- not what an actual user
+        /// wants to see while scanning.
         private static func planeVisualization(
             for planeAnchor: ARPlaneAnchor
         ) -> SCNNode {
-            let plane = SCNPlane(
-                width: CGFloat(planeAnchor.planeExtent.width),
-                height: CGFloat(planeAnchor.planeExtent.height)
-            )
-            let material = SCNMaterial()
-            material.diffuse.contents =
+            let width = CGFloat(planeAnchor.planeExtent.width)
+            let height = CGFloat(planeAnchor.planeExtent.height)
+            // blue = wall (vertical), green = floor/ceiling
+            // (horizontal) -- same convention as the web review
+            // UI's confidence coloring, so a capture reviewed later
+            // in the browser uses a consistent visual language
+            let color =
                 planeAnchor.alignment == .vertical
-                ? UIColor.systemBlue.withAlphaComponent(0.35)
-                : UIColor.systemGreen.withAlphaComponent(0.35)
-            material.isDoubleSided = true
-            // Unlit: renders at the exact set color regardless of
-            // ARKit's estimated ambient lighting. Without this, a
-            // semi-transparent overlay can render nearly invisible
-            // under realistic (dim/uneven) room lighting -- a known
-            // AR debug-overlay pitfall, and the actual fix Apple's
-            // own plane-visualization sample code uses.
-            material.lightingModel = .constant
-            plane.materials = [material]
+                ? UIColor.systemBlue : UIColor.systemGreen
 
-            let planeNode = SCNNode(geometry: plane)
-            planeNode.simdPosition = planeAnchor.center
-            planeNode.eulerAngles.x = -.pi / 2
-            return planeNode
+            let container = SCNNode()
+            container.simdPosition = planeAnchor.center
+            // SCNPlane lies in the local XY plane by default (normal
+            // along Z); ARKit's plane anchors define their extent
+            // along local X/Z (normal along Y) regardless of whether
+            // the anchor represents a vertical or horizontal
+            // real-world surface -- the anchor's own transform
+            // handles the actual world-space orientation. Standard
+            // rotation from Apple's own ARKit plane-visualization
+            // sample code.
+            container.eulerAngles.x = -.pi / 2
+
+            let fillNode = Self.fillNode(
+                width: width, height: height, color: color
+            )
+            fillNode.name = "fill"
+            container.addChildNode(fillNode)
+
+            let outlineNode = Self.outlineNode(
+                width: width, height: height, color: color
+            )
+            outlineNode.name = "outline"
+            container.addChildNode(outlineNode)
+
+            return container
         }
 
+        private static func fillNode(
+            width: CGFloat, height: CGFloat, color: UIColor
+        ) -> SCNNode {
+            let plane = SCNPlane(width: width, height: height)
+            let material = SCNMaterial()
+            // Deliberately translucent -- a "highlight," not a
+            // "cover." The first version was fully opaque (0.35+),
+            // which hid real surface detail like door handles or
+            // window frames. But 0.15 turned out to be too subtle
+            // to read as useful feedback at all once compressed
+            // through video/screen recording -- 0.25 is the
+            // corrected middle ground: still clearly see-through,
+            // but visible enough to actually help while scanning.
+            material.diffuse.contents = color.withAlphaComponent(0.25)
+            material.isDoubleSided = true
+            material.lightingModel = .constant
+            plane.materials = [material]
+            return SCNNode(geometry: plane)
+        }
+
+        /// A rectangular border built from four thin SCNBox bars,
+        /// not a line-primitive outline. The earlier line-loop
+        /// version (SCNGeometryElement with .line primitiveType)
+        /// rendered far too thin to actually see once compressed
+        /// through video/screen recording -- SceneKit line
+        /// primitives typically render at a fixed ~1px width
+        /// regardless of any hinted width, which isn't reliably
+        /// visible. Real geometry (a thin box per edge) has actual
+        /// physical thickness, so it stays visible and looks the
+        /// same regardless of device/renderer quirks around line
+        /// rendering.
+        private static func outlineNode(
+            width: CGFloat, height: CGFloat, color: UIColor
+        ) -> SCNNode {
+            let container = SCNNode()
+            let barThickness: CGFloat = 0.025  // ~2.5cm, visible
+            // but not heavy at typical room scale
+
+            let material = SCNMaterial()
+            material.diffuse.contents = color
+            material.lightingModel = .constant
+
+            let horizontalBar = SCNBox(
+                width: width,
+                height: barThickness,
+                length: 0.001,
+                chamferRadius: 0
+            )
+            horizontalBar.materials = [material]
+
+            let topNode = SCNNode(geometry: horizontalBar)
+            topNode.position = SCNVector3(0, Float(height / 2), 0)
+            container.addChildNode(topNode)
+
+            let bottomNode = SCNNode(geometry: horizontalBar)
+            bottomNode.position = SCNVector3(0, Float(-height / 2), 0)
+            container.addChildNode(bottomNode)
+
+            let verticalBar = SCNBox(
+                width: barThickness,
+                height: height,
+                length: 0.001,
+                chamferRadius: 0
+            )
+            verticalBar.materials = [material]
+
+            let leftNode = SCNNode(geometry: verticalBar)
+            leftNode.position = SCNVector3(Float(-width / 2), 0, 0)
+            container.addChildNode(leftNode)
+
+            let rightNode = SCNNode(geometry: verticalBar)
+            rightNode.position = SCNVector3(Float(width / 2), 0, 0)
+            container.addChildNode(rightNode)
+
+            return container
+        }
+
+        /// Builds a wireframe SCNGeometry directly from an
+        /// ARMeshAnchor's raw vertex/face buffers. This is the
+        /// standard ARKit-to-SceneKit bridging pattern: ARKit's
+        /// ARGeometrySource/ARGeometryElement are Metal-buffer-backed
+        /// and map directly onto SCNGeometrySource/SCNGeometryElement
+        /// with matching parameters, so no manual vertex copying is
+        /// needed (unlike ARCaptureSession.swift's point-cloud
+        /// extraction, which DOES need to walk vertices one at a
+        /// time -- here we hand the whole buffer to SceneKit as-is).
         private static func meshVisualization(
             for meshAnchor: ARMeshAnchor
         ) -> SCNNode {
@@ -201,6 +340,26 @@ struct CaptureView: View {
                     .padding(8)
                     .background(Color.black.opacity(0.6))
                     .cornerRadius(8)
+
+                // Honest scanning-technique tip, not a promise of
+                // better detection -- flat, textureless surfaces
+                // (a plain painted ceiling especially) are a real,
+                // known hard case for camera-based plane detection
+                // in general, not something app code can fix
+                // outright. This is genuine, achievable guidance,
+                // not a claim that it solves ceiling detection.
+                if viewModel.isCapturing {
+                    Text(
+                        "Tip: move slowly, get close to corners "
+                            + "and fixtures for better detection"
+                    )
+                    .font(.caption2)
+                    .foregroundColor(.white.opacity(0.85))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.5))
+                    .cornerRadius(6)
+                }
 
                 HStack(spacing: 16) {
                     Button(viewModel.isCapturing ? "Stop" : "Start") {
