@@ -204,3 +204,37 @@ main {
 .conf-high-fill { fill: #2ea44f; }
 .conf-med-fill { fill: #d4a72c; }
 .conf-low-fill { fill: #d1242f; }
+
+/* Gap suggestions -- deliberately distinct from confirmed walls
+   (dashed, orange) so a suggestion never reads as "already part of
+   the model." Never auto-applied; see docs/BACKLOG.md. */
+.gap-suggestion-line {
+  stroke: #ff8c00;
+  stroke-width: 3;
+  stroke-dasharray: 8, 6;
+  stroke-linecap: round;
+}
+.gap-suggestion-accept {
+  fill: #2ea44f;
+  cursor: pointer;
+}
+.gap-suggestion-accept-label {
+  fill: white;
+  font-size: 13px;
+  font-weight: bold;
+  text-anchor: middle;
+  pointer-events: none;
+  user-select: none;
+}
+.gap-suggestion-dismiss {
+  fill: #d1242f;
+  cursor: pointer;
+}
+.gap-suggestion-dismiss-label {
+  fill: white;
+  font-size: 13px;
+  font-weight: bold;
+  text-anchor: middle;
+  pointer-events: none;
+  user-select: none;
+}

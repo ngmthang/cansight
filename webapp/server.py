@@ -51,6 +51,7 @@ from geometry.capture_ingestion import (
     build_building_model_from_capture,
 )
 from geometry.room_extraction import extract_rooms
+from geometry.gap_inference import suggest_gap_completions
 import webapp.storage as storage
 from export.ifc_export import export_to_ifc
 from export.dxf_export import export_to_dxf
@@ -465,6 +466,37 @@ def review_add_wall():
         return jsonify({"error": str(e)}), 400
     _persist_current_state()
     return jsonify({"ok": True, "wall_id": new_id})
+
+
+@app.route("/api/suggest_gaps", methods=["GET"])
+def suggest_gaps_route():
+    """The automated half of the furniture-occlusion story
+    (docs/BACKLOG.md): analyzes the current wall set for dangling,
+    collinear endpoints and suggests plausible bridging walls.
+    Purely advisory -- accepting a suggestion just calls the same
+    /api/review/add_wall endpoint a manually-drawn wall would use,
+    so accepted suggestions are indistinguishable from a human
+    drawing the wall by hand."""
+    model = _require_model()
+    level = next(iter(model.levels.keys()))
+    wall_ids = model.levels[level].walls
+    segments = [model.objects[wid].centerline for wid in wall_ids]
+
+    suggestions = suggest_gap_completions(segments)
+    return jsonify(
+        {
+            "suggestions": [
+                {
+                    "id": i,
+                    "start": list(s.suggested_centerline[0]),
+                    "end": list(s.suggested_centerline[1]),
+                    "gap_distance": round(s.gap_distance, 2),
+                    "collinearity_deg": round(s.collinearity_deg, 1),
+                }
+                for i, s in enumerate(suggestions)
+            ]
+        }
+    )
 
 
 @app.route("/api/reextract_rooms", methods=["POST"])

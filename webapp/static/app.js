@@ -16,12 +16,21 @@ const bundlePathEl = document.getElementById("bundle-path");
 const loadBtn = document.getElementById("load-btn");
 const loadStatusEl = document.getElementById("load-status");
 const drawWallBtn = document.getElementById("draw-wall-btn");
+const suggestGapsBtn = document.getElementById("suggest-gaps-btn");
 const reextractBtn = document.getElementById("reextract-btn");
 const exportIfcBtn = document.getElementById("export-ifc-btn");
+const exportDxfBtn = document.getElementById("export-dxf-btn");
 const drawHintEl = document.getElementById("draw-hint");
 const remainingCountEl = document.getElementById("remaining-count");
 const reviewItemEl = document.getElementById("review-item");
 const validationErrorsEl = document.getElementById("validation-errors");
+
+// Gap suggestions are a transient overlay -- cleared whenever the
+// floor plan re-renders (i.e. whenever the model changes), since a
+// stale suggestion could point at a wall that no longer exists in
+// its old position. Re-fetch via the "Suggest Gaps" button to see
+// current suggestions again after any change.
+let currentSuggestions = [];
 
 function confidenceBand(confidence) {
   if (confidence >= 0.9) return "high";
@@ -84,6 +93,7 @@ function clearSvg() {
 
 function renderFloorplan(data) {
   clearSvg();
+  currentSuggestions = [];
   const transform = computeTransform(data);
   svgEl.dataset.minX = transform.minX;
   svgEl.dataset.minY = transform.minY;
@@ -395,6 +405,16 @@ async function exportIfc() {
   alert(`Exported to ${data.path}`);
 }
 
+async function exportDxf() {
+  const resp = await fetch("/api/export_dxf", { method: "POST" });
+  const data = await resp.json();
+  if (!resp.ok) {
+    alert("Export failed: " + (data.error || "unknown error"));
+    return;
+  }
+  alert(`Exported to ${data.path}\n(open in AutoCAD, or import into SketchUp via File > Import)`);
+}
+
 // --- Draw-missing-wall interaction ---
 
 function toggleDrawingMode() {
@@ -446,10 +466,139 @@ async function submitNewWall(start, end) {
   await fetchModel();
 }
 
+// --- Gap suggestions (docs/BACKLOG.md's furniture-occlusion
+// gap-inference feature) ---
+
+function toSvgCoords(x, y) {
+  const scale = parseFloat(svgEl.dataset.scale);
+  const minX = parseFloat(svgEl.dataset.minX);
+  const minY = parseFloat(svgEl.dataset.minY);
+  const viewH = parseFloat(svgEl.dataset.viewH);
+  return [(x - minX) * scale, viewH - (y - minY) * scale];
+}
+
+async function fetchGapSuggestions() {
+  const resp = await fetch("/api/suggest_gaps");
+  const data = await resp.json();
+  if (!resp.ok) {
+    alert("Could not fetch suggestions: " + (data.error || ""));
+    return;
+  }
+  currentSuggestions = data.suggestions;
+  renderGapSuggestions();
+}
+
+function renderGapSuggestions() {
+  // remove any previously-drawn suggestion elements without
+  // touching the rest of the floor plan
+  document
+    .querySelectorAll(".gap-suggestion")
+    .forEach((el) => el.remove());
+
+  for (const s of currentSuggestions) {
+    const [x1, y1] = toSvgCoords(s.start[0], s.start[1]);
+    const [x2, y2] = toSvgCoords(s.end[0], s.end[1]);
+
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("x1", x1);
+    line.setAttribute("y1", y1);
+    line.setAttribute("x2", x2);
+    line.setAttribute("y2", y2);
+    line.setAttribute("class", "gap-suggestion gap-suggestion-line");
+    const title = document.createElementNS(SVG_NS, "title");
+    title.textContent =
+      `Suggested wall -- gap ${s.gap_distance}m, ` +
+      `collinearity ${s.collinearity_deg}deg. Click + to accept, ` +
+      `x to dismiss.`;
+    line.appendChild(title);
+    svgEl.appendChild(line);
+
+    const midX = (x1 + x2) / 2;
+    const midY = (y1 + y2) / 2;
+
+    const acceptCircle = document.createElementNS(SVG_NS, "circle");
+    acceptCircle.setAttribute("cx", midX - 10);
+    acceptCircle.setAttribute("cy", midY);
+    acceptCircle.setAttribute("r", 9);
+    acceptCircle.setAttribute(
+      "class",
+      "gap-suggestion gap-suggestion-accept"
+    );
+    acceptCircle.addEventListener("click", (evt) => {
+      evt.stopPropagation();
+      acceptSuggestion(s);
+    });
+    svgEl.appendChild(acceptCircle);
+
+    const acceptLabel = document.createElementNS(SVG_NS, "text");
+    acceptLabel.setAttribute("x", midX - 10);
+    acceptLabel.setAttribute("y", midY + 4);
+    acceptLabel.setAttribute(
+      "class",
+      "gap-suggestion gap-suggestion-accept-label"
+    );
+    acceptLabel.textContent = "+";
+    svgEl.appendChild(acceptLabel);
+
+    const dismissCircle = document.createElementNS(SVG_NS, "circle");
+    dismissCircle.setAttribute("cx", midX + 10);
+    dismissCircle.setAttribute("cy", midY);
+    dismissCircle.setAttribute("r", 9);
+    dismissCircle.setAttribute(
+      "class",
+      "gap-suggestion gap-suggestion-dismiss"
+    );
+    dismissCircle.addEventListener("click", (evt) => {
+      evt.stopPropagation();
+      dismissSuggestion(s.id);
+    });
+    svgEl.appendChild(dismissCircle);
+
+    const dismissLabel = document.createElementNS(SVG_NS, "text");
+    dismissLabel.setAttribute("x", midX + 10);
+    dismissLabel.setAttribute("y", midY + 4);
+    dismissLabel.setAttribute(
+      "class",
+      "gap-suggestion gap-suggestion-dismiss-label"
+    );
+    dismissLabel.textContent = "\u00d7";
+    svgEl.appendChild(dismissLabel);
+  }
+}
+
+async function acceptSuggestion(suggestion) {
+  const resp = await fetch("/api/review/add_wall", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      start: suggestion.start,
+      end: suggestion.end,
+    }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    alert("Could not accept suggestion: " + data.error);
+    return;
+  }
+  // fetchModel() re-renders the floor plan, which resets
+  // currentSuggestions -- accepted suggestion is gone, and any
+  // other suggestions get cleared too since they may no longer be
+  // valid against the updated wall set (re-fetch to see current
+  // ones again)
+  await fetchModel();
+}
+
+function dismissSuggestion(id) {
+  currentSuggestions = currentSuggestions.filter((s) => s.id !== id);
+  renderGapSuggestions();
+}
+
 function setControlsEnabled(enabled) {
   drawWallBtn.disabled = !enabled;
+  suggestGapsBtn.disabled = !enabled;
   reextractBtn.disabled = !enabled;
   exportIfcBtn.disabled = !enabled;
+  exportDxfBtn.disabled = !enabled;
 }
 
 // --- Wire up event listeners ---
@@ -459,8 +608,10 @@ document
   .getElementById("upload-btn")
   .addEventListener("click", uploadBundleZip);
 drawWallBtn.addEventListener("click", toggleDrawingMode);
+suggestGapsBtn.addEventListener("click", fetchGapSuggestions);
 reextractBtn.addEventListener("click", reextractRooms);
 exportIfcBtn.addEventListener("click", exportIfc);
+exportDxfBtn.addEventListener("click", exportDxf);
 svgEl.addEventListener("click", handleSvgClick);
 
 fetchModel();

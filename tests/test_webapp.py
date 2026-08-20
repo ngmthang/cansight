@@ -452,6 +452,85 @@ def test_two_projects_coexist_independently():
     assert resp_b.status_code == 200
 
 
+def test_suggest_gaps_finds_furniture_occluded_wall():
+    """A wall split into two collinear fragments (furniture
+    occlusion) plus the rest of a closed room -- confirms the
+    endpoint surfaces a correct suggestion."""
+    client = _make_client()
+    import webapp.server as server_module
+    from building_model.schema import BuildingModel
+    from review.correction_session import build_review_queue
+
+    bm = BuildingModel(building_id="gap_suggest_test")
+    bm.add_level("L1")
+    bm.add_wall("L1", ((0, 0), (2, 0)), confidence=0.4)
+    bm.add_wall("L1", ((3, 0), (5, 0)), confidence=0.4)
+    bm.add_wall("L1", ((5, 0), (5, 4)), confidence=0.4)
+    bm.add_wall("L1", ((5, 4), (0, 4)), confidence=0.4)
+    bm.add_wall("L1", ((0, 4), (0, 0)), confidence=0.4)
+    server_module._state["model"] = bm
+    server_module._state["queue"] = build_review_queue(bm)
+
+    resp = client.get("/api/suggest_gaps")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["suggestions"]) == 1
+    s = data["suggestions"][0]
+    assert set(map(tuple, [s["start"], s["end"]])) == {(2, 0), (3, 0)}
+
+
+def test_accept_gap_suggestion_closes_room():
+    """The full intended flow: fetch a suggestion, accept it via
+    the existing add_wall endpoint (using the suggestion's own
+    coordinates), confirm the room now closes."""
+    client = _make_client()
+    import webapp.server as server_module
+    from building_model.schema import BuildingModel
+    from review.correction_session import build_review_queue
+
+    bm = BuildingModel(building_id="gap_accept_test")
+    bm.add_level("L1")
+    bm.add_wall("L1", ((0, 0), (2, 0)), confidence=0.4)
+    bm.add_wall("L1", ((3, 0), (5, 0)), confidence=0.4)
+    bm.add_wall("L1", ((5, 0), (5, 4)), confidence=0.4)
+    bm.add_wall("L1", ((5, 4), (0, 4)), confidence=0.4)
+    bm.add_wall("L1", ((0, 4), (0, 0)), confidence=0.4)
+    server_module._state["model"] = bm
+    server_module._state["queue"] = build_review_queue(bm)
+
+    suggestion = client.get("/api/suggest_gaps").get_json()[
+        "suggestions"
+    ][0]
+
+    resp = client.post(
+        "/api/review/add_wall",
+        json={"start": suggestion["start"], "end": suggestion["end"]},
+    )
+    assert resp.status_code == 200
+
+    resp = client.post("/api/reextract_rooms")
+    assert len(resp.get_json()["rooms"]) == 1
+
+
+def test_suggest_gaps_empty_for_closed_room():
+    client = _make_client()
+    import webapp.server as server_module
+    from building_model.schema import BuildingModel
+    from review.correction_session import build_review_queue
+
+    bm = BuildingModel(building_id="no_gaps_test")
+    bm.add_level("L1")
+    bm.add_wall("L1", ((0, 0), (5, 0)), confidence=0.4)
+    bm.add_wall("L1", ((5, 0), (5, 4)), confidence=0.4)
+    bm.add_wall("L1", ((5, 4), (0, 4)), confidence=0.4)
+    bm.add_wall("L1", ((0, 4), (0, 0)), confidence=0.4)
+    server_module._state["model"] = bm
+    server_module._state["queue"] = build_review_queue(bm)
+
+    resp = client.get("/api/suggest_gaps")
+    assert resp.get_json()["suggestions"] == []
+
+
 if __name__ == "__main__":
     tests = [
         v for k, v in list(globals().items()) if k.startswith("test_")
