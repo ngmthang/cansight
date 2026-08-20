@@ -317,6 +317,134 @@ def test_bundle_with_only_short_planes_raises():
             assert "tall enough" in str(e)
 
 
+def test_within_wall_gap_detected_as_door():
+    """The scenario opening_detection.py was ORIGINALLY built for
+    but never wired into the real pipeline until now: a wall
+    observed as two separate fragments with a real gap between
+    them, at door width (0.6-1.2m). This is the mechanism that
+    actually preserves gap information -- unlike the LiDAR/RANSAC
+    path, where plane-fitting naturally spans across internal gaps
+    within one detected plane (confirmed separately; see
+    docs/PROJECT_STATUS.md)."""
+    planes = [
+        {
+            "alignment": "vertical",
+            "boundary_vertices": _wall_corners(0, 0, 2.0, 0),
+        },
+        {
+            "alignment": "vertical",
+            "boundary_vertices": _wall_corners(2.9, 0, 5, 0),
+        },
+        {
+            "alignment": "vertical",
+            "boundary_vertices": _wall_corners(5, 0, 5, 4),
+        },
+        {
+            "alignment": "vertical",
+            "boundary_vertices": _wall_corners(5, 4, 0, 4),
+        },
+        {
+            "alignment": "vertical",
+            "boundary_vertices": _wall_corners(0, 4, 0, 0),
+        },
+        {
+            "alignment": "horizontal",
+            "boundary_vertices": [
+                (0, 0, 0),
+                (5, 0, 0),
+                (5, 0, 4),
+                (0, 0, 4),
+            ],
+        },
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bd = os.path.join(tmpdir, "door_test")
+        write_plane_bundle(bd, "s", "iPhone 8", "t", planes)
+        result = ingest_capture(bd)
+        bm = build_building_model_from_capture(result, "door_test")
+
+    doors = [o for o in bm.objects.values() if o.type.value == "door"]
+    windows = [
+        o for o in bm.objects.values() if o.type.value == "window"
+    ]
+    assert len(doors) == 1
+    assert len(windows) == 0
+    assert abs(doors[0].width - 0.9) < 0.05
+    assert doors[0].confidence <= 0.6  # non-LiDAR cap
+    assert bm.validate() == []
+
+
+def test_within_wall_gap_detected_as_window():
+    """Same mechanism, a wider gap (1.5m) outside door_range but
+    within window_range -- should classify as a window, not a
+    door."""
+    planes = [
+        {
+            "alignment": "vertical",
+            "boundary_vertices": _wall_corners(0, 0, 1.5, 0),
+        },
+        {
+            "alignment": "vertical",
+            "boundary_vertices": _wall_corners(3.0, 0, 5, 0),
+        },
+        {
+            "alignment": "vertical",
+            "boundary_vertices": _wall_corners(5, 0, 5, 4),
+        },
+        {
+            "alignment": "vertical",
+            "boundary_vertices": _wall_corners(5, 4, 0, 4),
+        },
+        {
+            "alignment": "vertical",
+            "boundary_vertices": _wall_corners(0, 4, 0, 0),
+        },
+        {
+            "alignment": "horizontal",
+            "boundary_vertices": [
+                (0, 0, 0),
+                (5, 0, 0),
+                (5, 0, 4),
+                (0, 0, 4),
+            ],
+        },
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bd = os.path.join(tmpdir, "window_test")
+        write_plane_bundle(bd, "s", "iPhone 8", "t", planes)
+        result = ingest_capture(bd)
+        bm = build_building_model_from_capture(result, "window_test")
+
+    doors = [o for o in bm.objects.values() if o.type.value == "door"]
+    windows = [
+        o for o in bm.objects.values() if o.type.value == "window"
+    ]
+    assert len(doors) == 0
+    assert len(windows) == 1
+    assert abs(windows[0].width - 1.5) < 0.05
+    assert bm.validate() == []
+
+
+def test_single_observation_wall_has_no_gaps():
+    """A wall seen as only ONE observation (support_count=1) has
+    only one covered_interval spanning its whole length -- there's
+    no internal gap possible by construction. Confirms
+    _find_wall_openings() doesn't spuriously invent an opening."""
+    result_planes = _synthetic_room_planes()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bd = os.path.join(tmpdir, "no_gap_test")
+        write_plane_bundle(bd, "s", "iPhone 8", "t", result_planes)
+        result = ingest_capture(bd)
+        bm = build_building_model_from_capture(result, "no_gap_test")
+
+    doors = [o for o in bm.objects.values() if o.type.value == "door"]
+    windows = [
+        o for o in bm.objects.values() if o.type.value == "window"
+    ]
+    assert len(doors) == 0
+    assert len(windows) == 0
+
+
 if __name__ == "__main__":
     tests = [
         v for k, v in list(globals().items()) if k.startswith("test_")

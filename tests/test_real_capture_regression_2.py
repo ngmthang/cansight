@@ -83,6 +83,25 @@ def test_real_capture_2_produces_valid_building_model():
     assert bm.validate() == []
 
 
+def test_real_capture_2_detects_one_door_gap():
+    """New regression check, added when opening_detection.py was
+    first wired into the real pipeline: this real capture has one
+    wall observed as multiple fragments with a genuine 0.81m gap
+    between them (door width). Locks in that finding so future
+    changes to the within-wall gap logic get checked against real
+    data, not just synthetic."""
+    result = ingest_capture(FIXTURE_DIR)
+    bm = build_building_model_from_capture(result, "real_capture_2")
+    doors = [o for o in bm.objects.values() if o.type.value == "door"]
+    windows = [
+        o for o in bm.objects.values() if o.type.value == "window"
+    ]
+    assert len(doors) == 1
+    assert len(windows) == 0
+    assert abs(doors[0].width - 0.81) < 0.02
+    assert doors[0].confidence <= 0.6
+
+
 def test_real_capture_2_wall_confidences_stay_non_lidar_capped():
     result = ingest_capture(FIXTURE_DIR)
     bm = build_building_model_from_capture(result, "real_capture_2")

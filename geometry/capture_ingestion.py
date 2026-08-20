@@ -45,6 +45,11 @@ from geometry.height_inference import (
     HeightEstimate,
 )
 from geometry.room_extraction import extract_rooms
+from geometry.opening_detection import (
+    GapObservation,
+    merge_gaps,
+    classify_openings,
+)
 from building_model.schema import BuildingModel, Provenance
 
 # Confidence formulas per capture method. NON_LIDAR values are
@@ -403,6 +408,42 @@ def _ingest_plane_detection_bundle(bundle_dir: str) -> IngestedCapture:
     )
 
 
+def _find_wall_openings(wall: FittedWall) -> list:
+    """
+    Bridges FittedWall.covered_intervals (per-observation coverage
+    along the wall) to opening_detection.py's interval-merge
+    algorithm: finds positions along this wall where NO observation
+    ever saw material, and classifies each by width into door/
+    window/noise/reconstruction_gap/ambiguous. opening_detection.py
+    has existed and been tested since early in this project, but
+    was never actually wired into the real capture pipeline until
+    now -- see docs/PROJECT_STATUS.md.
+    """
+    (x0, y0), (x1, y1) = wall.centerline
+    wall_length = math.hypot(x1 - x0, y1 - y0)
+    if wall_length < 1e-6 or not wall.covered_intervals:
+        return []
+
+    ordered = sorted(wall.covered_intervals)
+    combined = [ordered[0]]
+    for start, end in ordered[1:]:
+        last_start, last_end = combined[-1]
+        if start <= last_end:
+            combined[-1] = (last_start, max(last_end, end))
+        else:
+            combined.append((start, end))
+
+    gaps: list[GapObservation] = []
+    if combined[0][0] > 0:
+        gaps.append(GapObservation(0.0, combined[0][0]))
+    for i in range(len(combined) - 1):
+        gaps.append(GapObservation(combined[i][1], combined[i + 1][0]))
+    if combined[-1][1] < wall_length:
+        gaps.append(GapObservation(combined[-1][1], wall_length))
+
+    return classify_openings(merge_gaps(gaps))
+
+
 def build_building_model_from_capture(
     ingested: IngestedCapture,
     building_id: str,
@@ -445,6 +486,64 @@ def build_building_model_from_capture(
             ),
         )
         wall_ids.append(wall.id)
+
+        for candidate in _find_wall_openings(w):
+            if candidate.likely_type not in ("door", "window"):
+                # "noise", "reconstruction_gap", "ambiguous" --
+                # per opening_detection.py's own "don't guess"
+                # design, these are deliberately NOT added as
+                # Opening objects. A too-wide or ambiguous gap is
+                # more likely leftover furniture occlusion within
+                # the wall than a real opening; asserting a wrong
+                # door/window would be worse than omitting it.
+                continue
+
+            wall_length = wall.length()
+            position_on_wall = (
+                (candidate.start + candidate.end) / 2 / wall_length
+                if wall_length > 0
+                else 0.5
+            )
+            opening_confidence = min(
+                confidence, 0.7 if is_lidar else 0.5
+            )
+            opening_provenance = Provenance(
+                detection_method=(
+                    ingested.capture_method + "_opening_gap"
+                )
+            )
+
+            if candidate.likely_type == "door":
+                door_height = min(2.1, wall.height * 0.9)
+                if door_height <= 0:
+                    continue
+                bm.add_door(
+                    level_id,
+                    wall.id,
+                    width=candidate.width,
+                    height=door_height,
+                    sill_height=0.0,
+                    position_on_wall=position_on_wall,
+                    confidence=opening_confidence,
+                    provenance=opening_provenance,
+                )
+            else:  # "window"
+                window_sill = min(0.9, wall.height * 0.35)
+                window_height = min(
+                    1.2, wall.height * 0.9 - window_sill
+                )
+                if window_height <= 0:
+                    continue
+                bm.add_window(
+                    level_id,
+                    wall.id,
+                    width=candidate.width,
+                    height=window_height,
+                    sill_height=window_sill,
+                    position_on_wall=position_on_wall,
+                    confidence=opening_confidence,
+                    provenance=opening_provenance,
+                )
 
     rooms = extract_rooms([w.centerline for w in ingested.fitted_walls])
     room_confidence = 0.85 if is_lidar else 0.5

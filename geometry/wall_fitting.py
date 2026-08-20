@@ -1,32 +1,31 @@
 """
-    Problem: The reconstruction pipeline observes the SAME physical wall many
-    times across different video/LiDAR frames, each observation slightly noisy
-    and slightly offset. We need ONE clean wall centerline per physical wall.
+Problem: The reconstruction pipeline observes the SAME physical wall
+many
+times across different video/LiDAR frames, each observation slightly
+noisy
+and slightly offset. We need ONE clean wall centerline per physical
+wall.
 
-    This is a clustering problem: group near-parallel, near-collinear segment
-    observations, the fit one clean line through each group.
+This is a clustering problem: group near-parallel, near-collinear
+segment
+observations, then fit one clean line through each group.
 
-    Algorithm:
-        1. Union-Find (disjoint set) to cluster segments whose angle and
-           perpendicular offset are both within tolerance -> O(n^2) pairwise
-           compare + near-inverse-Ackermann union/find, fine for the segment
-           counts a single-room scan produces (hundreds, not millions).
-        2. For each cluster, fit a line via PCA / total-least-squares on all
-           endpoint coordinates (robust to noise in both x and y, unlike
-           ordinary least-squares regression which assumes error only in y).
-        3. Project all endpoints onto the fitted line direction to get the
-           wall's extent (min/max projection = the two endpoints of the clean
-           centerline).
-
-    @author: Minh Thang Nguyen
-    @version: August 8, 2026
+Algorithm:
+  1. Union-Find (disjoint set) to cluster segments whose angle and
+     perpendicular offset are both within tolerance -> O(n^2) pairwise
+     compare + near-inverse-Ackermann union/find, fine for the segment
+     counts a single-room scan produces (hundreds, not millions).
+  2. For each cluster, fit a line via PCA / total-least-squares on all
+     endpoint coordinates (robust to noise in both x and y, unlike
+     ordinary least-squares regression which assumes error only in y).
+  3. Project all endpoints onto the fitted line direction to get the
+     wall's extent (min/max projection = the two endpoints of the clean
+     centerline).
 """
 
-
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
-
 
 Point = tuple[float, float]
 Segment = tuple[Point, Point]
@@ -39,7 +38,7 @@ class UnionFind:
 
     def find(self, x: int) -> int:
         while self.parent[x] != x:
-            self.parent[x] = self.parent[self.parent[x]] # path halving
+            self.parent[x] = self.parent[self.parent[x]]  # path halving
             x = self.parent[x]
         return x
 
@@ -56,7 +55,9 @@ class UnionFind:
 
 def _segment_angle(seg: Segment) -> float:
     (x0, y0), (x1, y1) = seg
-    return math.atan2(y1 - y0, x1 - x0) % math.pi # undirected angle in [0, pi)
+    return (
+        math.atan2(y1 - y0, x1 - x0) % math.pi
+    )  # undirected angle in [0, pi)
 
 
 def _angle_diff(a: float, b: float) -> float:
@@ -79,7 +80,8 @@ def cluster_wall_observations(
     angle_tol_deg: float = 6.0,
     offset_tol: float = 0.08,
 ) -> list[list[int]]:
-    """Group segment indices that likely represent the same physical wall."""
+    """Group segment indices that likely represent the same
+    physical wall."""
     n = len(segments)
     uf = UnionFind(n)
     angle_tol = math.radians(angle_tol_deg)
@@ -104,9 +106,11 @@ def cluster_wall_observations(
     return list(groups.values())
 
 
-def fit_line_total_least_squares(points: list[Point]) -> tuple[Point, Point]:
+def fit_line_total_least_squares(
+    points: list[Point],
+) -> tuple[Point, Point]:
     """
-    Total-least-squares line fit via PCA: minimize perpendicular distance
+    Total-least-squares line fit via PCA: minimizes perpendicular distance
     to all points (not just vertical distance like ordinary regression),
     which matters because wall observation noise isn't axis-aligned.
     Returns (centroid, unit_direction).
@@ -119,7 +123,8 @@ def fit_line_total_least_squares(points: list[Point]) -> tuple[Point, Point]:
     syy = sum((p[1] - cy) ** 2 for p in points)
     sxy = sum((p[0] - cx) * (p[1] - cy) for p in points)
 
-    # principal eigenvector of the 2x2 covariance matrix [[sxx,sxy],[sxy,syy]]
+    # principal eigenvector of the 2x2 covariance matrix
+    # [[sxx,sxy],[sxy,syy]]
     theta = 0.5 * math.atan2(2 * sxy, sxx - syy)
     direction = (math.cos(theta), math.sin(theta))
     return (cx, cy), direction
@@ -129,7 +134,19 @@ def fit_line_total_least_squares(points: list[Point]) -> tuple[Point, Point]:
 class FittedWall:
     centerline: Segment
     thickness_estimate: float
-    support_count: int # how many observations contributed
+    support_count: int  # how many observations contributed
+    covered_intervals: list[tuple[float, float]] = field(
+        default_factory=list
+    )
+    # Per-contributing-observation coverage, in meters measured
+    # from THIS wall's own start (0) to its own end (its length) --
+    # not world coordinates. Lets downstream code
+    # (capture_ingestion.py, bridging to opening_detection.py) find
+    # positions along the wall where NO observation ever saw
+    # material -- which is how a real door or window shows up in
+    # the raw sensor data (as opposed to a gap BETWEEN two separate
+    # walls, which is gap_inference.py's concern, a different
+    # problem).
 
 
 def fit_walls(
@@ -151,16 +168,38 @@ def fit_walls(
         centroid, direction = fit_line_total_least_squares(pts)
         dx, dy = direction
 
-        # project every point onto the fitted line to find the wall's extent
-        projections = [((p[0] - centroid[0]) * dx + (p[1] - centroid[1]) * dy) for p in pts]
+        # project every point onto the fitted line to find the wall's
+        # extent
+        projections = [
+            ((p[0] - centroid[0]) * dx + (p[1] - centroid[1]) * dy)
+            for p in pts
+        ]
         t_min, t_max = min(projections), max(projections)
 
         p_start = (centroid[0] + t_min * dx, centroid[1] + t_min * dy)
         p_end = (centroid[0] + t_max * dx, centroid[1] + t_max * dy)
 
-        results.append(FittedWall(
-            centerline=(p_start, p_end),
-            thickness_estimate=assumed_thickness,
-            support_count=len(cluster),
-        ))
+        # Each contributing observation's OWN coverage along the
+        # fitted line (not the pooled cluster extent above) --
+        # normalized so 0 = this wall's start, letting later code
+        # find gaps strictly WITHIN the wall.
+        covered_intervals: list[tuple[float, float]] = []
+        for idx in cluster:
+            seg = segments[idx]
+            seg_projections = [
+                (p[0] - centroid[0]) * dx + (p[1] - centroid[1]) * dy
+                for p in seg
+            ]
+            seg_t_min = min(seg_projections) - t_min
+            seg_t_max = max(seg_projections) - t_min
+            covered_intervals.append((seg_t_min, seg_t_max))
+
+        results.append(
+            FittedWall(
+                centerline=(p_start, p_end),
+                thickness_estimate=assumed_thickness,
+                support_count=len(cluster),
+                covered_intervals=covered_intervals,
+            )
+        )
     return results
