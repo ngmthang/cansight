@@ -24,6 +24,7 @@
 import SwiftUI
 import ARKit
 import SceneKit
+import simd
 
 struct ARPassthroughView: UIViewRepresentable {
     let captureSession: ARCaptureSession
@@ -63,6 +64,80 @@ struct ARPassthroughView: UIViewRepresentable {
     class Coordinator: NSObject, ARSCNViewDelegate {
         let captureSession: ARCaptureSession
 
+        // Caps how many plane overlays render simultaneously.
+        // Detected planes can climb well past what's useful to
+        // look at during a long real scan (observed: 13+ over a
+        // ~3 minute session and still climbing) -- past a point,
+        // more overlays just clutter the screen and add node
+        // overhead for no benefit. This ONLY limits the visual
+        // overlay: actual capture data still comes from every
+        // detected anchor via captureSession.handleAnchorsAdded
+        // below, completely unaffected by this cap.
+        private var overlaidPlaneAnchors: Set<UUID> = []
+        private let maxPlaneOverlays = 30
+
+        // Live duplicate suppression: ARKit's raw plane detector
+        // often reports multiple separate, overlapping detections
+        // for what is really ONE continuous wall, especially in
+        // visually complex/partially-occluded areas (confirmed via
+        // real-device testing: a desk/monitor area produced two
+        // crossing, overlapping overlay boxes on the same wall).
+        // The Python pipeline already merges near-duplicates after
+        // the fact (wall_fitting.fit_walls()'s clustering), but the
+        // live on-screen overlay showed every raw fragment
+        // separately, which reads as clutter/confusion while
+        // scanning. This tracks each shown overlay's world-space
+        // plane (normal + center) so a genuinely-duplicate new
+        // detection can be skipped instead of drawn as a second,
+        // overlapping box.
+        private struct TrackedPlane {
+            let alignment: ARPlaneAnchor.Alignment
+            let worldNormal: SIMD3<Float>
+            let worldCenter: SIMD3<Float>
+        }
+        private var trackedPlanesByAnchorID: [UUID: TrackedPlane] = [:]
+
+        /// True if this plane is close enough (same orientation,
+        /// same approximate position along that orientation) to an
+        /// already-shown overlay that it's very likely the same
+        /// physical wall, not a new one -- same idea as
+        /// wall_fitting.py's clustering (angle tolerance + offset
+        /// tolerance), just computed directly on raw plane
+        /// normals/centers here instead of fitted 2D segments,
+        /// since that's all a live ARPlaneAnchor gives us.
+        private func isDuplicate(of planeAnchor: ARPlaneAnchor) -> Bool {
+            let transform = planeAnchor.transform
+            let normal4 = transform * SIMD4<Float>(0, 1, 0, 0)
+            let worldNormal = simd_normalize(
+                SIMD3<Float>(normal4.x, normal4.y, normal4.z)
+            )
+            let center4 =
+                transform * SIMD4<Float>(planeAnchor.center, 1)
+            let worldCenter = SIMD3<Float>(
+                center4.x, center4.y, center4.z
+            )
+
+            for existing in trackedPlanesByAnchorID.values {
+                guard existing.alignment == planeAnchor.alignment
+                else { continue }
+                // abs(): two nearly-parallel planes can have
+                // normals pointing in opposite directions
+                // depending on which side ARKit detected first
+                let normalDot = abs(
+                    simd_dot(existing.worldNormal, worldNormal)
+                )
+                guard normalDot > 0.94 else { continue }  // ~20deg
+                let delta = worldCenter - existing.worldCenter
+                let distanceAlongNormal = abs(
+                    simd_dot(delta, existing.worldNormal)
+                )
+                if distanceAlongNormal < 0.2 {  // 20cm coplanar tol
+                    return true
+                }
+            }
+            return false
+        }
+
         init(captureSession: ARCaptureSession) {
             self.captureSession = captureSession
         }
@@ -75,6 +150,28 @@ struct ARPassthroughView: UIViewRepresentable {
             captureSession.handleAnchorsAdded([anchor])
 
             if let planeAnchor = anchor as? ARPlaneAnchor {
+                guard overlaidPlaneAnchors.count < maxPlaneOverlays
+                else { return }
+                guard !isDuplicate(of: planeAnchor) else { return }
+
+                overlaidPlaneAnchors.insert(planeAnchor.identifier)
+                let transform = planeAnchor.transform
+                let normal4 = transform * SIMD4<Float>(0, 1, 0, 0)
+                let center4 =
+                    transform * SIMD4<Float>(planeAnchor.center, 1)
+                trackedPlanesByAnchorID[planeAnchor.identifier] =
+                    TrackedPlane(
+                        alignment: planeAnchor.alignment,
+                        worldNormal: simd_normalize(
+                            SIMD3<Float>(
+                                normal4.x, normal4.y, normal4.z
+                            )
+                        ),
+                        worldCenter: SIMD3<Float>(
+                            center4.x, center4.y, center4.z
+                        )
+                    )
+
                 node.addChildNode(
                     Self.planeVisualization(for: planeAnchor)
                 )
@@ -139,6 +236,12 @@ struct ARPassthroughView: UIViewRepresentable {
             for anchor: ARAnchor
         ) {
             captureSession.handleAnchorsRemoved([anchor])
+            if let planeAnchor = anchor as? ARPlaneAnchor {
+                overlaidPlaneAnchors.remove(planeAnchor.identifier)
+                trackedPlanesByAnchorID.removeValue(
+                    forKey: planeAnchor.identifier
+                )
+            }
         }
 
         /// Builds a plane overlay as two layered pieces, matching
