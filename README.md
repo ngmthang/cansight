@@ -1,108 +1,613 @@
-<<<<<<< HEAD
-# Reality Capture → BIM: V1 Foundation
+# Cansight
 
-This is Phase 0–2 of the build roadmap: the Building Model, the core
-geometry algorithms, and the IFC export — all provable and testable
-**without any real sensor data**. Phase 3 (real ARKit capture) plugs
-into this foundation later without changing any of it.
+## Reality Capture → Editable Building Model
 
-## What's here and why it's built in this order
+Cansight is a reality-capture tool for turning a physical interior space into a structured, editable building model.
 
-building_model/schema.py     Phase 0  Source-of-truth data model (Wall,
-                                       Door, Window, Room, Level,
-                                       relationships, validation)
-geometry/wall_fitting.py     Phase 1  Cluster noisy multi-frame wall
-                                       observations into one clean
-                                       centerline per physical wall
-                                       (union-find clustering +
-                                       total-least-squares line fit)
-geometry/room_extraction.py  Phase 1  Extract room polygons from a wall
-                                       graph (planar-graph half-edge
-                                       face traversal), including
-                                       T-junction splitting
-geometry/opening_detection.py Phase 1 Merge noisy door/window gap
-                                       observations (interval merging)
-review/queue.py              Phase 2  Confidence-sorted correction
-                                       queue backend (min-heap, lazy
-                                       deletion)
-export/ifc_export.py         Phase 0  Building Model -> validated IFC4
-examples/synthetic_house.py  Phase 3  Full pipeline demo on synthetic
-                                       noisy data, no hardware needed
-tests/test_all.py                     Regression suite for all of the
-                                       above
+The project combines **iPhone/iPad AR capture**, **geometry reconstruction**, **human review**, and **CAD/BIM export** into one workflow:
 
-Why this order: none of Phase 0–2 needs a phone, a scan, or any ML
-model. It's pure, deterministic, fully testable code — which means we
-can find and fix real bugs (and we did, see below) before spending any
-effort on the much harder, much less controllable problem of real
-sensor data. Phase 3's synthetic pipeline proves the whole chain works
-together before Phase 4 (real capture) is even started.
+```text
+Physical Room
+     │
+     ▼
+ iPhone / iPad
+  ARKit Capture
+     │
+     ▼
+ Capture Bundle
+     │
+     ▼
+ Cansight Geometry Pipeline
+     │
+     ├── Wall Detection
+     ├── Room Extraction
+     ├── 3D Height Inference
+     └── Opening Detection
+     │
+     ▼
+ Building Model
+     │
+     ▼
+ Review & Correction
+     │
+     ├── Fix uncertain geometry
+     └── Draw missing walls
+     │
+     ▼
+ Export
+ ┌───┴────────┐
+ ▼            ▼
+IFC4         DXF
+ │             │
+ ▼             ├── AutoCAD
+Revit/BIM      └── SketchUp
+```
 
-## Running it
+Cansight is currently a **working prototype for real interior capture and reconstruction**. It is designed to let you capture a room, reconstruct its basic architectural geometry, review the result, make corrections, and export the model for use in other tools.
 
-pip install ifcopenshell --break-system-packages   # only external dependency
-python3 tests/test_all.py                          # 8/8 should pass
-python3 examples/synthetic_house.py                # full pipeline demo
+---
 
-The demo prints each pipeline stage and writes `synthetic_house.ifc`
-which you can open in any IFC viewer (e.g. web-ifc, BIMcollab, or
-Blender's BlenderBIM addon) to see the actual geometry.
+## What can I do with Cansight today?
 
-## Bugs this process already caught (worth knowing about)
+The current version supports the following end-to-end workflow:
 
-Building the synthetic pipeline immediately surfaced two real
-correctness bugs that would have been much harder to find later
-against messy real sensor data:
+### 📱 Capture a real room
 
-1. **T-junction vertices didn't match.** A dividing wall's endpoint
-   met another wall in its *middle*, not at a shared endpoint. The
-   fix (`_split_at_t_junctions`) originally cut the host wall at the
-   *projected* point on its line — but under real-world noise that
-   projected point differs from the neighboring wall's actual endpoint
-   by the noise offset, so the two "shared" vertices never matched
-   after rounding, and the room extraction silently returned zero
-   rooms. Fixed by cutting at the actual neighboring endpoint instead
-   of its projection.
-2. **Review queue could permanently lose track of an unresolved
-   item.** `next_for_review()` was popping from the heap even when the
-   object hadn't been resolved yet, so an unfixed low-confidence object
-   could disappear from the queue forever after being looked at once.
-   Fixed so only `resolve()` removes something from consideration.
+Use an iPhone or iPad with ARKit to scan an interior space.
 
-Both are exactly the kind of subtle-but-serious bugs the V1 spec's
-"build incrementally, test each layer" philosophy (Master Plan §33) is
-meant to catch early.
+Cansight supports:
 
-## Next steps (in order)
+* **LiDAR devices** — dense spatial capture
+* **Non-LiDAR devices** — ARKit plane detection
 
-1. **Extend room classification** — the room extraction gives geometry;
-   add the object-detection-based classifier (kitchen/bedroom/etc.)
-   described in spec §8. Needs a labeled image dataset — can start
-   with a small hand-labeled set.
-2. **Wire opening_detection into the Building Model** — currently
-   standalone; connect `classify_openings()` output to
-   `BuildingModel.add_door`/`add_window` calls, the way
-   `synthetic_house.py` already does for walls/rooms.
-3. **3D extension** — everything above is 2D (floor-plan-plane). Add
-   floor/ceiling elevation and wall height inference from vertical
-   point-cloud extent (spec §5, the depth-estimation → point-cloud
-   steps this repo doesn't touch yet).
-4. **RoomPlan spike** (spec §21) — time-boxed 1-2 week evaluation of
-   whether Apple's RoomPlan API covers a meaningful fraction of the
-   wall/room detection this repo currently does with synthetic
-   input, before committing engineering time to a from-scratch
-   point-cloud pipeline.
-5. **Real capture ingestion** — once 3 and 4 are resolved, build the
-   iOS capture app and the server-side point-cloud fusion step that
-   feeds real segment observations into `wall_fitting.fit_walls()`
-   instead of the synthetic generator in `examples/synthetic_house.py`.
+The capture app provides live visualization of detected surfaces while scanning and saves the result as a Cansight capture bundle.
 
-Everything in this repo is designed so that step 5 only needs to
-produce `list[Segment]` (pairs of 2D points) — the exact same input
-`fit_walls()` already consumes from synthetic data. That's the whole
-point of building it in this order: the interface between "real
-sensor data" and "clean architecture" was locked down and tested
-before any sensor code exists.
-=======
-# cansight
->>>>>>> 420866c426715b864eb162b0799d3c51c12a70d2
+---
+
+### 🧱 Reconstruct architectural geometry
+
+Cansight processes the captured data to identify:
+
+* walls
+* wall segments
+* rooms
+* floor elevation
+* ceiling elevation
+* wall height
+* doors/openings
+* windows/openings
+
+The geometry pipeline is designed to merge noisy observations from multiple frames into a cleaner building representation.
+
+---
+
+### 🔎 Review the reconstruction
+
+Real-world scanning is imperfect.
+
+Furniture, monitors, decorations, and other objects can prevent the device from seeing parts of a wall. ARKit can also detect flat objects that are not actually architectural walls.
+
+Cansight therefore includes a review workflow.
+
+You can:
+
+* inspect the generated model
+* review low-confidence geometry
+* correct detected elements
+* add missing walls
+* save corrections to the project
+
+For example, if a sofa blocks part of a wall during capture:
+
+```text
+Captured room
+
+┌───────────────┐
+│               │
+│               │
+│     SOFA      │
+│   ███████     │
+│   ███████     │
+└───────────────┘
+
+        ↓
+
+Detected wall
+
+┌───────     ───┐
+│               │
+│               │
+
+        ↓
+
+Draw Missing Wall
+
+┌───────────────┐
+│               │
+│               │
+│     SOFA      │
+│   ███████     │
+│   ███████     │
+└───────────────┘
+```
+
+This human-in-the-loop step is an intentional part of the current workflow.
+
+---
+
+### 💾 Save projects
+
+The web application maintains projects locally using SQLite.
+
+This allows you to:
+
+* create multiple projects
+* upload captures
+* keep reconstructed models
+* reopen projects later
+* preserve review/correction state
+
+---
+
+### 📐 Export the result
+
+Cansight currently provides two export formats.
+
+#### IFC4
+
+Export the building model as IFC4 for BIM workflows.
+
+A typical workflow is:
+
+```text
+Cansight
+   ↓
+ IFC4
+   ↓
+ Revit / IFC-compatible BIM software
+```
+
+Cansight does not currently create native `.rvt` files.
+
+#### DXF
+
+Export the floor-plan geometry as DXF.
+
+DXF can be used with:
+
+* AutoCAD
+* SketchUp through its DXF import workflow
+* other CAD applications supporting DXF
+
+---
+
+# Getting started
+
+There are two ways to try Cansight.
+
+## Option 1 — Try the software without a physical device
+
+If you want to explore the reconstruction pipeline first, use the included Python examples and tests.
+
+### Clone the repository
+
+```bash
+git clone https://github.com/ngmthang/cansight.git
+cd cansight
+```
+
+### Create a Python environment
+
+```bash
+python -m venv .venv
+```
+
+Activate it:
+
+### macOS / Linux
+
+```bash
+source .venv/bin/activate
+```
+
+### Windows
+
+```powershell
+.venv\Scripts\activate
+```
+
+Install the dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+### Run the tests
+
+```bash
+python tests/test_all.py
+```
+
+### Run the synthetic example
+
+```bash
+python examples/synthetic_house.py
+```
+
+The synthetic example demonstrates the reconstruction pipeline without requiring an iPhone/iPad.
+
+---
+
+# Option 2 — Capture a real room
+
+For the full workflow, use the iOS capture application.
+
+The iOS implementation is located under:
+
+```text
+ios/
+```
+
+The capture application uses Apple's ARKit.
+
+## Supported capture modes
+
+Cansight automatically uses the appropriate mode for the device:
+
+| Device capability          | Capture method             |
+| -------------------------- | -------------------------- |
+| LiDAR-equipped iPhone/iPad | LiDAR / dense spatial data |
+| Non-LiDAR iPhone/iPad      | ARKit plane detection      |
+
+The current non-LiDAR workflow has been tested using a real iPad. The LiDAR pipeline is implemented but should still be considered a validation area on actual LiDAR hardware.
+
+See [`ios/README.md`](ios/README.md) for the device-specific setup instructions.
+
+---
+
+# Capture workflow
+
+Once the iOS capture application is running:
+
+### 1. Start a capture
+
+Point the device at the room you want to reconstruct.
+
+### 2. Move around the room
+
+Slowly move the device so ARKit can observe the walls and other surfaces from different positions.
+
+For best results:
+
+* move slowly
+* keep surfaces visible
+* avoid covering walls with your body
+* capture as much of each wall as possible
+* scan from multiple viewpoints
+
+### 3. Watch the live visualization
+
+The application displays ARKit's detected surfaces during capture.
+
+This gives you immediate feedback about what the device is seeing.
+
+### 4. Stop the capture
+
+When you have collected enough observations, stop the session.
+
+### 5. Save the capture bundle
+
+The application saves the captured data as a Cansight bundle.
+
+A bundle contains a manifest plus the captured spatial observations:
+
+```text
+capture/
+├── manifest.json
+└── points.json
+```
+
+for LiDAR capture, or:
+
+```text
+capture/
+├── manifest.json
+└── planes.json
+```
+
+for non-LiDAR capture.
+
+The manifest tells Cansight which capture pipeline should be used.
+
+---
+
+# Process a capture
+
+The Python side automatically reads the capture bundle and chooses the correct ingestion path.
+
+Conceptually:
+
+```text
+capture bundle
+      │
+      ▼
+capture_ingestion
+      │
+      ├── LiDAR
+      │
+      └── Non-LiDAR
+      │
+      ▼
+wall fitting
+      │
+      ▼
+room extraction
+      │
+      ▼
+3D inference
+      │
+      ▼
+opening detection
+      │
+      ▼
+BuildingModel
+```
+
+You do not need to manually convert a LiDAR capture into the non-LiDAR format or vice versa.
+
+---
+
+# Use the Web App
+
+Cansight includes a local browser-based interface for working with projects.
+
+Start the server:
+
+```bash
+python webapp/server.py
+```
+
+Then open:
+
+```text
+http://127.0.0.1:5000
+```
+
+The web interface provides the current user-facing workflow for:
+
+* managing projects
+* uploading capture bundles
+* viewing reconstructed geometry
+* reviewing detected elements
+* correcting geometry
+* drawing missing walls
+* saving project state
+* exporting models
+
+The application runs locally; the current version does not require a hosted Cansight account or cloud service.
+
+---
+
+# Review your model
+
+After processing a capture, inspect the reconstructed floor plan and 3D geometry.
+
+Pay particular attention to:
+
+### Walls
+
+Check that:
+
+* walls are in the correct positions
+* separate wall fragments have been merged correctly
+* furniture has not caused missing wall sections
+* non-architectural objects have not been interpreted as walls
+
+### Rooms
+
+Check that:
+
+* room boundaries are closed
+* dividing walls are represented correctly
+* the generated room polygons match the physical space
+
+### Openings
+
+Check detected:
+
+* doors
+* windows
+* other wall openings
+
+### Heights
+
+Check the inferred:
+
+* floor elevation
+* ceiling elevation
+* wall height
+
+The current system is intended as a reconstruction and editing workflow, rather than a guaranteed survey-grade measurement system.
+
+---
+
+# Correct missing geometry
+
+One of the most important current features is the ability to manually add geometry that could not be reliably recovered from the scan.
+
+For example, if furniture blocks a wall:
+
+1. Open the project.
+2. Locate the missing section.
+3. Select **Draw Missing Wall**.
+4. Draw the wall segment.
+5. Save the correction.
+6. Continue reviewing the model.
+
+This allows a real scan to be converted into a usable building model even when the sensor cannot observe every surface.
+
+---
+
+# Export your model
+
+Once the model has been reviewed, export it for use in another application.
+
+## IFC
+
+Use IFC when your destination is a BIM workflow.
+
+```text
+Cansight → IFC4 → Revit / IFC software
+```
+
+## DXF
+
+Use DXF when you want a CAD/floor-plan representation.
+
+```text
+Cansight → DXF → AutoCAD
+                 ↘ SketchUp
+```
+
+The current project deliberately uses standard interchange formats rather than attempting to maintain proprietary native writers for every target application.
+
+---
+
+# What makes Cansight different?
+
+Cansight is not simply a viewer for ARKit data.
+
+The project owns the processing pipeline between the sensor and the final building model.
+
+```text
+ARKit data
+    ↓
+Cansight geometry algorithms
+    ↓
+BuildingModel
+    ↓
+Human review
+    ↓
+Interchange formats
+```
+
+The core building representation is independent from the iOS capture layer.
+
+This means the same building-model and geometry pipeline can process different capture sources as long as they produce the expected Cansight capture data.
+
+Cansight also intentionally keeps human correction in the workflow rather than assuming that automated reconstruction will always be correct.
+
+---
+
+# Current capabilities at a glance
+
+| Capability                      | Available |
+| ------------------------------- | :-------: |
+| iPhone/iPad ARKit capture       |     ✅     |
+| LiDAR capture pipeline          |     ✅     |
+| Non-LiDAR plane capture         |     ✅     |
+| Live capture visualization      |     ✅     |
+| Wall reconstruction             |     ✅     |
+| Room extraction                 |     ✅     |
+| 3D floor/ceiling inference      |     ✅     |
+| Opening detection               |     ✅     |
+| Confidence/review workflow      |     ✅     |
+| Manual wall creation            |     ✅     |
+| Browser-based review UI         |     ✅     |
+| Local project persistence       |     ✅     |
+| IFC4 export                     |     ✅     |
+| DXF export                      |     ✅     |
+| Synthetic end-to-end example    |     ✅     |
+| Real-capture regression testing |     ✅     |
+
+---
+
+# Important limitations
+
+Cansight is an active prototype and should currently be treated accordingly.
+
+The system does **not** yet guarantee:
+
+* survey-grade measurements
+* complete recovery of furniture-obscured walls
+* automatic reconstruction of every room in a building
+* reliable multi-room stitching
+* multi-floor building reconstruction
+* native `.rvt` Revit output
+* native `.skp` SketchUp output
+* cloud collaboration
+
+For the detailed engineering status, known limitations, and development roadmap, see:
+
+* [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md)
+* [`docs/BACKLOG.md`](docs/BACKLOG.md)
+
+Those documents are intended for project/development context; this README is intended to explain how to use Cansight.
+
+---
+
+# Project structure
+
+```text
+cansight/
+│
+├── ios/                  # iPhone/iPad AR capture
+│
+├── geometry/             # Capture ingestion and reconstruction
+│   ├── capture_ingestion.py
+│   ├── plane_detection.py
+│   ├── wall_fitting.py
+│   ├── room_extraction.py
+│   ├── height_inference.py
+│   └── opening_detection.py
+│
+├── building_model/       # Structured building representation
+│
+├── review/               # Review and correction workflow
+│
+├── export/               # IFC and DXF exporters
+│
+├── webapp/               # Local browser application
+│
+├── examples/             # Example workflows
+│
+├── tests/                # Automated and real-capture tests
+│
+└── docs/                 # Detailed project documentation
+```
+
+---
+
+# Documentation
+
+If you are a **user**, start here:
+
+**This README** → understand the product and run the current workflow.
+
+If you are **setting up the iOS capture app**:
+
+→ [`ios/README.md`](ios/README.md)
+
+If you are **developing Cansight**:
+
+→ [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md)
+
+If you want to understand **future/deferred work**:
+
+→ [`docs/BACKLOG.md`](docs/BACKLOG.md)
+
+If you want to understand the **RoomPlan evaluation and architectural decision**:
+
+→ [`docs/ROOMPLAN_SPIKE.md`](docs/ROOMPLAN_SPIKE.md)
+
+---
+
+# In one sentence
+
+**Cansight lets you capture a real room with an iPhone/iPad, reconstruct it into an editable building model, review and correct the result, and export that model to standard BIM/CAD formats.**
+
+---
+
+## License
+
+MIT License. See [`LICENSE`](LICENSE).
